@@ -6,6 +6,11 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = []
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
 [project.scripts]
 tmux-agent-session = "tmux_agent_session.cli:main"
 tas = "tmux_agent_session.cli:main"
