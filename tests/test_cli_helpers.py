@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 
 from tmux_agent_session import cli
 
@@ -139,6 +140,72 @@ def test_display_helpers_and_tmux_target_use_best_available_values() -> None:
     assert cli.tmux_target(rec) == "work:1.2"
 
 
+def test_capture_tmux_pane_preview_uses_pane_id_and_limits_output(monkeypatch) -> None:
+    pane = cli.TmuxPane(
+        session_name="work",
+        window_index="1",
+        window_name="editor",
+        pane_index="2",
+        pane_id="%3",
+        pane_tty="ttys001",
+    )
+    rec = cli.SessionRecord(
+        tool="codex",
+        session_id="session-1",
+        path=None,
+        last_write=None,
+        tmux_pane=pane,
+    )
+
+    def fake_run(cmd, capture_output, text):
+        assert cmd == [
+            "tmux",
+            "capture-pane",
+            "-p",
+            "-t",
+            "%3",
+            "-S",
+            "-3",
+        ]
+        assert capture_output is True
+        assert text is True
+        return subprocess.CompletedProcess(cmd, 0, stdout="one\ntwo\nthree\nfour\n")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    assert cli.capture_tmux_pane_preview(rec, limit=3) == ["two", "three", "four"]
+
+
+def test_capture_tmux_pane_preview_returns_empty_on_failure_or_missing_pane(
+    monkeypatch,
+) -> None:
+    rec = cli.SessionRecord(
+        tool="codex",
+        session_id="session-1",
+        path=None,
+        last_write=None,
+    )
+    assert cli.capture_tmux_pane_preview(rec) == []
+
+    pane = cli.TmuxPane(
+        session_name="work",
+        window_index="1",
+        window_name="editor",
+        pane_index="2",
+        pane_id="%3",
+        pane_tty="ttys001",
+    )
+    rec.tmux_pane = pane
+
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1, stdout=""),
+    )
+
+    assert cli.capture_tmux_pane_preview(rec) == []
+
+
 def test_move_selection_handles_empty_unknown_and_bounds() -> None:
     selectable = [2, 4, 6]
     assert cli.move_selection(None, selectable, 1) == 2
@@ -168,3 +235,12 @@ def test_render_picker_line_and_header_include_expected_columns() -> None:
     assert "gpt-5" in line
     assert "STATUS" in header
     assert "TOOL" in header
+
+
+def test_picker_split_widths_uses_sidebar_only_when_terminal_is_wide_enough() -> None:
+    assert cli.picker_split_widths(78) == (78, 0)
+
+    list_width, sidebar_width = cli.picker_split_widths(100)
+    assert list_width >= 44
+    assert sidebar_width >= 32
+    assert list_width + sidebar_width + 2 == 100

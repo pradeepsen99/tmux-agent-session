@@ -78,3 +78,13 @@ def test_build_picker_details_includes_core_fields() -> None:
     assert "Tmux: work:1.2 | editor | ttys001" in joined
     assert "Process: pid 10 | ttys001 | 1m 1s" in joined
     assert "Model: gpt-5" in joined
+
+
+def test_build_picker_details_includes_pane_preview() -> None:
+    lines = cli.build_picker_details(
+        make_record(), 80, pane_preview=["$ ls", "README.md"]
+    )
+
+    joined = "\n".join(lines)
+    assert "Preview: $ ls" in joined
+    assert "README.md" in joined

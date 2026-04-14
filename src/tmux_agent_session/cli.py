@@ -517,6 +517,32 @@ def focus_tmux_pane(rec: SessionRecord) -> bool:
     return True
 
 
+def capture_tmux_pane_preview(rec: SessionRecord, limit: int = 12) -> list[str]:
+    if rec.tmux_pane is None:
+        return []
+
+    result = subprocess.run(
+        [
+            "tmux",
+            "capture-pane",
+            "-p",
+            "-t",
+            rec.tmux_pane.pane_id,
+            "-S",
+            f"-{max(1, limit)}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return []
+
+    lines = [line.rstrip() for line in result.stdout.splitlines()]
+    if len(lines) > limit:
+        lines = lines[-limit:]
+    return lines
+
+
 def age_minutes(ts: float | None) -> float | None:
     if ts is None:
         return None
@@ -861,6 +887,23 @@ def render_picker_header(width: int) -> str:
     )
 
 
+def picker_split_widths(width: int) -> tuple[int, int]:
+    min_list_width = 44
+    min_sidebar_width = 32
+    divider_width = 2
+    if width < min_list_width + min_sidebar_width + divider_width + 1:
+        return width, 0
+
+    sidebar_width = min(52, max(min_sidebar_width, width // 2 - 2))
+    list_width = width - sidebar_width - divider_width
+    if list_width < min_list_width:
+        sidebar_width = width - min_list_width - divider_width
+        list_width = width - sidebar_width - divider_width
+    if list_width < min_list_width or sidebar_width < min_sidebar_width:
+        return width, 0
+    return list_width, sidebar_width
+
+
 def safe_addnstr(
     stdscr: curses.window, y: int, x: int, text: str, width: int, attr: int = 0
 ) -> None:
@@ -885,9 +928,16 @@ def append_detail(lines: list[str], label: str, value: str | None, width: int) -
             lines.append(" " * len(prefix) + chunk)
 
 
-def build_picker_details(rec: SessionRecord, width: int) -> list[str]:
+def build_picker_details(
+    rec: SessionRecord, width: int, pane_preview: list[str] | None = None
+) -> list[str]:
     lines: list[str] = []
     append_detail(lines, "Session", rec.session_id, width)
+
+    if pane_preview:
+        for index, line in enumerate(pane_preview):
+            append_detail(lines, "Preview" if index == 0 else "", line, width)
+
     append_detail(lines, "CWD", display_cwd(rec), width)
 
     if rec.tmux_pane is not None:
@@ -962,18 +1012,18 @@ def run_picker(records: list[SessionRecord]) -> int:
         selected = selectable[0] if selectable else None
         top = 0
         message = "Enter focus  j/k move  q/Esc cancel"
+        preview_cache: dict[str, list[str]] = {}
+        selected_preview: list[str] = []
+        selected_preview_id: str | None = None
 
         while True:
             height, width = stdscr.getmaxyx()
-            detail_height = 0 if height < 14 else min(9, max(6, height // 3))
             footer_y = max(0, height - 1)
             row_start = 2
-            divider_y = None
-            if detail_height:
-                divider_y = max(row_start + 1, footer_y - detail_height - 1)
-                list_height = max(1, divider_y - row_start)
-            else:
-                list_height = max(1, footer_y - row_start)
+            list_width, sidebar_width = picker_split_widths(width)
+            divider_x = list_width if sidebar_width else None
+            sidebar_x = list_width + 2 if sidebar_width else 0
+            list_height = max(1, footer_y - row_start)
             if selected is not None:
                 if selected < top:
                     top = selected
@@ -984,6 +1034,23 @@ def run_picker(records: list[SessionRecord]) -> int:
 
             stdscr.erase()
             selected_rec = records[selected] if selected is not None else None
+            current_preview_id = (
+                selected_rec.tmux_pane.pane_id
+                if selected_rec is not None and selected_rec.tmux_pane is not None
+                else None
+            )
+            if current_preview_id != selected_preview_id:
+                selected_preview_id = current_preview_id
+                if current_preview_id is None:
+                    selected_preview = []
+                else:
+                    selected_preview = preview_cache.get(current_preview_id)
+                    if selected_preview is None:
+                        preview_limit = max(6, footer_y - row_start - 1)
+                        selected_preview = capture_tmux_pane_preview(
+                            selected_rec, limit=preview_limit
+                        )
+                        preview_cache[current_preview_id] = selected_preview
             focusable_count = len(selectable)
             title = f"Session Picker  {len(records)} shown  {focusable_count} focusable"
             if selected_rec is not None:
@@ -995,10 +1062,19 @@ def run_picker(records: list[SessionRecord]) -> int:
                 stdscr,
                 1,
                 0,
-                render_picker_header(width).ljust(width),
-                width,
+                render_picker_header(list_width).ljust(list_width),
+                list_width,
                 header_attr,
             )
+            if sidebar_width:
+                safe_addnstr(
+                    stdscr,
+                    1,
+                    sidebar_x,
+                    truncate("Selected Pane", sidebar_width).ljust(sidebar_width),
+                    sidebar_width,
+                    header_attr,
+                )
             for row, record_index in enumerate(
                 range(top, min(len(records), top + list_height)), start=1
             ):
@@ -1010,25 +1086,35 @@ def run_picker(records: list[SessionRecord]) -> int:
                 elif record_index == selected:
                     attr |= highlight_attr
                 safe_addnstr(
-                    stdscr, row_y, 0, render_picker_line(rec, width), width, attr
+                    stdscr,
+                    row_y,
+                    0,
+                    render_picker_line(rec, list_width),
+                    list_width,
+                    attr,
                 )
 
-            if divider_y is not None:
-                safe_addnstr(
-                    stdscr, divider_y, 0, "-" * max(0, width - 1), width, dim_attr
-                )
+            if divider_x is not None:
+                for y in range(1, footer_y):
+                    safe_addnstr(stdscr, y, divider_x, "|", 1, dim_attr)
                 if selected_rec is not None:
                     detail_lines = build_picker_details(
-                        selected_rec, max(20, width - 1)
+                        selected_rec,
+                        max(20, sidebar_width),
+                        pane_preview=selected_preview,
                     )
                 else:
                     detail_lines = [
                         "No focusable tmux target for the visible sessions."
                     ]
-                for index, line in enumerate(
-                    detail_lines[: footer_y - divider_y - 1], start=1
-                ):
-                    safe_addnstr(stdscr, divider_y + index, 0, line.ljust(width), width)
+                for index, line in enumerate(detail_lines[: footer_y - row_start]):
+                    safe_addnstr(
+                        stdscr,
+                        row_start + index,
+                        sidebar_x,
+                        line.ljust(sidebar_width),
+                        sidebar_width,
+                    )
 
             if not selectable:
                 message = "No tmux-mapped sessions available. Press q to exit."
