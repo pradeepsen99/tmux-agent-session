@@ -22,6 +22,7 @@ import re
 import shlex
 import subprocess
 import sys
+import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -76,6 +77,22 @@ class SessionRecord:
 SESSION_ID_PATTERNS = [
     re.compile(r"(?:--session|session_id|session)\s*[= ]\s*([A-Za-z0-9._:-]{6,})"),
     re.compile(r"\b([a-f0-9]{16,64})\b"),
+]
+
+# Ranked by utility in the picker: these fields are the most useful for deciding
+# which session to jump into without having to inspect the backing files.
+PICKER_METADATA_PRIMARY = [
+    ("Model", ("model",)),
+    ("Summary", ("summary", "title")),
+    ("Approval", ("approval_policy",)),
+    ("Activity", ("timestamp", "updated_at", "created_at")),
+    ("Origin", ("originator", "source")),
+]
+PICKER_METADATA_SECONDARY = [
+    ("Provider", ("model_provider",)),
+    ("CLI", ("cli_version",)),
+    ("Style", ("personality",)),
+    ("State", ("status",)),
 ]
 
 
@@ -560,6 +577,36 @@ def format_ts(ts: float | None) -> str:
     return dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def format_iso_ts(raw: str) -> str | None:
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        return dt.datetime.fromisoformat(text.replace("Z", "+00:00")).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    except ValueError:
+        return text
+
+
+def format_duration(seconds: int | None) -> str:
+    if seconds is None:
+        return "—"
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if sec or not parts:
+        parts.append(f"{sec}s")
+    return " ".join(parts)
+
+
 def truncate(text: str | None, width: int) -> str:
     if not text:
         return "—"
@@ -570,6 +617,78 @@ def truncate(text: str | None, width: int) -> str:
 
 def pad(text: str | None, width: int) -> str:
     return truncate(text, width).ljust(width)
+
+
+def metadata_text(key: str, value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if key in {"summary", "title"} and text.lower() in {"none", "null"}:
+            return None
+        if key in {"timestamp", "updated_at", "created_at"}:
+            return format_iso_ts(text)
+        return text
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    return None
+
+
+def first_metadata_value(rec: SessionRecord, keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        text = metadata_text(key, rec.metadata.get(key))
+        if text:
+            return text
+    return None
+
+
+def joined_metadata_value(rec: SessionRecord, keys: tuple[str, ...]) -> str | None:
+    values: list[str] = []
+    for key in keys:
+        text = metadata_text(key, rec.metadata.get(key))
+        if text and text not in values:
+            values.append(text)
+    if not values:
+        return None
+    return " / ".join(values)
+
+
+def picker_metadata_items(rec: SessionRecord, limit: int = 5) -> list[tuple[str, str]]:
+    items: list[tuple[str, str]] = []
+    used_labels: set[str] = set()
+
+    for label, keys in PICKER_METADATA_PRIMARY:
+        value = (
+            joined_metadata_value(rec, keys)
+            if label == "Origin"
+            else first_metadata_value(rec, keys)
+        )
+        if value:
+            items.append((label, value))
+            used_labels.add(label)
+
+    for label, keys in PICKER_METADATA_SECONDARY:
+        if len(items) >= limit or label in used_labels:
+            break
+        value = first_metadata_value(rec, keys)
+        if value:
+            items.append((label, value))
+
+    return items[:limit]
+
+
+def display_cwd(rec: SessionRecord) -> str | None:
+    return rec.cwd or (rec.matched_process.cwd if rec.matched_process else None)
+
+
+def display_model(rec: SessionRecord) -> str | None:
+    model = first_metadata_value(rec, ("model",))
+    if model:
+        return model
+    provider = first_metadata_value(rec, ("model_provider",))
+    return provider
 
 
 def print_table(records: list[SessionRecord]) -> None:
@@ -626,6 +745,7 @@ def print_json(records: list[SessionRecord]) -> None:
                 "path": str(rec.path) if rec.path is not None else None,
                 "last_write": format_ts(rec.last_write),
                 "cwd": rec.cwd,
+                "metadata": rec.metadata,
                 "score": rec.score,
                 "reasons": rec.reasons,
                 "tmux": None
@@ -705,24 +825,38 @@ def move_selection(current: int | None, selectable: list[int], step: int) -> int
 
 
 def render_picker_line(rec: SessionRecord, width: int) -> str:
+    model_width = 12
     target_width = 10
-    tool_width = 9
+    tool_width = 8
     status_width = 8
-    session_width = 24
-    fixed = tool_width + status_width + target_width + session_width + 8
+    session_width = 16
+    fixed = tool_width + status_width + target_width + model_width + session_width + 10
     cwd_width = max(12, width - fixed)
     return "  ".join(
         [
-            pad(rec.tool, tool_width),
             pad(rec.status, status_width),
+            pad(rec.tool, tool_width),
             pad(tmux_target(rec), target_width),
+            pad(display_model(rec), model_width),
             pad(rec.session_id, session_width),
-            truncate(
-                rec.cwd or (rec.matched_process.cwd if rec.matched_process else None),
-                cwd_width,
-            ),
+            truncate(display_cwd(rec), cwd_width),
         ]
     )[:width]
+
+
+def render_picker_header(width: int) -> str:
+    return render_picker_line(
+        SessionRecord(
+            tool="TOOL",
+            session_id="SESSION",
+            path=None,
+            last_write=None,
+            cwd="CWD",
+            metadata={"model": "MODEL"},
+            status="STATUS",
+        ),
+        width,
+    )
 
 
 def safe_addnstr(
@@ -734,6 +868,56 @@ def safe_addnstr(
         stdscr.addnstr(y, x, text, width, attr)
     except curses.error:
         pass
+
+
+def append_detail(lines: list[str], label: str, value: str | None, width: int) -> None:
+    if not value or width <= 0:
+        return
+    prefix = f"{label}: "
+    body_width = max(8, width - len(prefix))
+    wrapped = textwrap.wrap(value, body_width) or [value]
+    for index, chunk in enumerate(wrapped):
+        if index == 0:
+            lines.append(f"{prefix}{chunk}")
+        else:
+            lines.append(" " * len(prefix) + chunk)
+
+
+def build_picker_details(rec: SessionRecord, width: int) -> list[str]:
+    lines: list[str] = []
+    append_detail(lines, "Session", rec.session_id, width)
+    append_detail(lines, "CWD", display_cwd(rec), width)
+
+    if rec.tmux_pane is not None:
+        tmux_bits = [tmux_target(rec)]
+        if rec.tmux_pane.window_name:
+            tmux_bits.append(rec.tmux_pane.window_name)
+        if rec.tmux_pane.pane_tty:
+            tmux_bits.append(rec.tmux_pane.pane_tty)
+        append_detail(lines, "Tmux", " | ".join(tmux_bits), width)
+
+    if rec.matched_process is not None:
+        process_bits = [f"pid {rec.matched_process.pid}"]
+        if rec.matched_process.tty:
+            process_bits.append(rec.matched_process.tty)
+        runtime = format_duration(rec.matched_process.etime_seconds)
+        if runtime != "—":
+            process_bits.append(runtime)
+        append_detail(lines, "Process", " | ".join(process_bits), width)
+
+    file_bits: list[str] = []
+    if rec.last_write is not None:
+        file_bits.append(format_ts(rec.last_write))
+    if rec.path is not None:
+        file_bits.append(str(rec.path))
+    append_detail(lines, "File", " | ".join(file_bits), width)
+
+    for label, value in picker_metadata_items(rec):
+        append_detail(lines, label, value, width)
+
+    if not lines:
+        lines.append("No additional metadata for this session.")
+    return lines
 
 
 def run_picker(records: list[SessionRecord]) -> int:
@@ -750,16 +934,44 @@ def run_picker(records: list[SessionRecord]) -> int:
         except curses.error:
             pass
 
+        status_attrs = {
+            "active": curses.A_NORMAL,
+            "recent": curses.A_NORMAL,
+            "stale": curses.A_DIM,
+        }
+        if curses.has_colors():
+            try:
+                curses.start_color()
+                curses.init_pair(1, curses.COLOR_GREEN, -1)
+                curses.init_pair(2, curses.COLOR_YELLOW, -1)
+                curses.init_pair(3, curses.COLOR_CYAN, -1)
+                status_attrs = {
+                    "active": curses.color_pair(1),
+                    "recent": curses.color_pair(2),
+                    "stale": curses.color_pair(3) | curses.A_DIM,
+                }
+            except curses.error:
+                pass
+
         highlight_attr = curses.A_REVERSE
         dim_attr = curses.A_DIM
-        normal_attr = curses.A_NORMAL
+        title_attr = curses.A_BOLD
+        header_attr = curses.A_BOLD
         selected = selectable[0] if selectable else None
         top = 0
-        message = "Enter: focus pane  q/Esc: cancel"
+        message = "Enter focus  j/k move  q/Esc cancel"
 
         while True:
             height, width = stdscr.getmaxyx()
-            list_height = max(1, height - 3)
+            detail_height = 0 if height < 14 else min(9, max(6, height // 3))
+            footer_y = max(0, height - 1)
+            row_start = 2
+            divider_y = None
+            if detail_height:
+                divider_y = max(row_start + 1, footer_y - detail_height - 1)
+                list_height = max(1, divider_y - row_start)
+            else:
+                list_height = max(1, footer_y - row_start)
             if selected is not None:
                 if selected < top:
                     top = selected
@@ -769,20 +981,52 @@ def run_picker(records: list[SessionRecord]) -> int:
                 top = 0
 
             stdscr.erase()
-            title = "Session picker"
-            safe_addnstr(stdscr, 0, 0, title.ljust(width), width)
+            selected_rec = records[selected] if selected is not None else None
+            focusable_count = len(selectable)
+            title = f"Session Picker  {len(records)} shown  {focusable_count} focusable"
+            if selected_rec is not None:
+                title = f"{title}  Selected: {selected_rec.tool} {selected_rec.status}"
+            safe_addnstr(
+                stdscr, 0, 0, truncate(title, width).ljust(width), width, title_attr
+            )
+            safe_addnstr(
+                stdscr,
+                1,
+                0,
+                render_picker_header(width).ljust(width),
+                width,
+                header_attr,
+            )
             for row, record_index in enumerate(
                 range(top, min(len(records), top + list_height)), start=1
             ):
                 rec = records[record_index]
-                attr = normal_attr
+                row_y = row_start + row - 1
+                attr = status_attrs.get(rec.status, curses.A_NORMAL)
                 if rec.tmux_pane is None:
-                    attr = dim_attr
+                    attr |= dim_attr
                 elif record_index == selected:
-                    attr = highlight_attr
+                    attr |= highlight_attr
                 safe_addnstr(
-                    stdscr, row, 0, render_picker_line(rec, width), width, attr
+                    stdscr, row_y, 0, render_picker_line(rec, width), width, attr
                 )
+
+            if divider_y is not None:
+                safe_addnstr(
+                    stdscr, divider_y, 0, "-" * max(0, width - 1), width, dim_attr
+                )
+                if selected_rec is not None:
+                    detail_lines = build_picker_details(
+                        selected_rec, max(20, width - 1)
+                    )
+                else:
+                    detail_lines = [
+                        "No focusable tmux target for the visible sessions."
+                    ]
+                for index, line in enumerate(
+                    detail_lines[: footer_y - divider_y - 1], start=1
+                ):
+                    safe_addnstr(stdscr, divider_y + index, 0, line.ljust(width), width)
 
             if not selectable:
                 message = "No tmux-mapped sessions available. Press q to exit."
