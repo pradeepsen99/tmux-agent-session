@@ -822,9 +822,10 @@ def run_picker(records: list[SessionRecord]) -> int:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        description="List likely active Codex and OpenCode sessions"
-    )
+    kwargs = {"description": "List likely active Codex and OpenCode sessions"}
+    if Path(sys.argv[0]).name == "__main__.py" and __package__ == "tmux_agent_session":
+        kwargs["prog"] = "python -m tmux_agent_session"
+    p = argparse.ArgumentParser(**kwargs)
     p.add_argument("--tool", choices=["all", "codex", "opencode"], default="all")
     p.add_argument(
         "--active-minutes",
