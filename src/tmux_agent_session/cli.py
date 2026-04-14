@@ -76,10 +76,20 @@ class SessionRecord:
     reasons: list[str] = field(default_factory=list)
 
 
+@dataclass
+class AnsiStyle:
+    fg: int | None = None
+    bg: int | None = None
+    bold: bool = False
+    dim: bool = False
+    reverse: bool = False
+
+
 SESSION_ID_PATTERNS = [
     re.compile(r"(?:--session|session_id|session)\s*[= ]\s*([A-Za-z0-9._:-]{6,})"),
     re.compile(r"\b([a-f0-9]{16,64})\b"),
 ]
+ANSI_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
 
 # Ranked by utility in the picker: these fields are the most useful for deciding
 # which session to jump into without having to inspect the backing files.
@@ -526,6 +536,7 @@ def capture_tmux_pane_preview(rec: SessionRecord, limit: int = 12) -> list[str]:
             "tmux",
             "capture-pane",
             "-p",
+            "-e",
             "-t",
             rec.tmux_pane.pane_id,
             "-S",
@@ -541,6 +552,131 @@ def capture_tmux_pane_preview(rec: SessionRecord, limit: int = 12) -> list[str]:
     if len(lines) > limit:
         lines = lines[-limit:]
     return lines
+
+
+def ansi_color_from_256(code: int) -> tuple[int | None, bool]:
+    if code < 0:
+        return None, False
+    if code < 8:
+        return code, False
+    if code < 16:
+        return code - 8, True
+    if code < 232:
+        base_levels = [0, 95, 135, 175, 215, 255]
+        cube = code - 16
+        r = base_levels[(cube // 36) % 6]
+        g = base_levels[(cube // 6) % 6]
+        b = base_levels[cube % 6]
+    else:
+        gray = 8 + (code - 232) * 10
+        r = g = b = gray
+
+    palette = {
+        0: (0, 0, 0),
+        1: (205, 49, 49),
+        2: (13, 188, 121),
+        3: (229, 229, 16),
+        4: (36, 114, 200),
+        5: (188, 63, 188),
+        6: (17, 168, 205),
+        7: (229, 229, 229),
+    }
+    nearest = min(
+        palette,
+        key=lambda idx: sum(
+            (component - ref) ** 2 for component, ref in zip((r, g, b), palette[idx])
+        ),
+    )
+    return nearest, max(r, g, b) >= 200
+
+
+def apply_ansi_sgr(style: AnsiStyle, sgr: str) -> AnsiStyle:
+    codes = [int(part) for part in sgr.split(";") if part] if sgr else [0]
+    current = AnsiStyle(
+        fg=style.fg,
+        bg=style.bg,
+        bold=style.bold,
+        dim=style.dim,
+        reverse=style.reverse,
+    )
+    index = 0
+    while index < len(codes):
+        code = codes[index]
+        if code == 0:
+            current = AnsiStyle()
+        elif code == 1:
+            current.bold = True
+        elif code == 2:
+            current.dim = True
+        elif code == 22:
+            current.bold = False
+            current.dim = False
+        elif code == 7:
+            current.reverse = True
+        elif code == 27:
+            current.reverse = False
+        elif 30 <= code <= 37:
+            current.fg = code - 30
+        elif code == 39:
+            current.fg = None
+        elif 40 <= code <= 47:
+            current.bg = code - 40
+        elif code == 49:
+            current.bg = None
+        elif 90 <= code <= 97:
+            current.fg = code - 90
+            current.bold = True
+        elif 100 <= code <= 107:
+            current.bg = code - 100
+        elif code in {38, 48} and index + 2 < len(codes) and codes[index + 1] == 5:
+            mapped, is_bright = ansi_color_from_256(codes[index + 2])
+            if code == 38:
+                current.fg = mapped
+                current.bold = current.bold or is_bright
+            else:
+                current.bg = mapped
+            index += 2
+        index += 1
+    return current
+
+
+def parse_ansi_segments(text: str) -> list[tuple[str, AnsiStyle]]:
+    if not text:
+        return []
+
+    segments: list[tuple[str, AnsiStyle]] = []
+    style = AnsiStyle()
+    start = 0
+    for match in ANSI_SGR_RE.finditer(text):
+        if match.start() > start:
+            segments.append(
+                (
+                    text[start : match.start()],
+                    AnsiStyle(
+                        fg=style.fg,
+                        bg=style.bg,
+                        bold=style.bold,
+                        dim=style.dim,
+                        reverse=style.reverse,
+                    ),
+                )
+            )
+        style = apply_ansi_sgr(style, match.group(1))
+        start = match.end()
+    if start < len(text):
+        segments.append(
+            (
+                text[start:],
+                AnsiStyle(
+                    fg=style.fg,
+                    bg=style.bg,
+                    bold=style.bold,
+                    dim=style.dim,
+                    reverse=style.reverse,
+                ),
+            )
+        )
+    return segments
 
 
 def age_minutes(ts: float | None) -> float | None:
@@ -894,14 +1030,27 @@ def picker_split_widths(width: int) -> tuple[int, int]:
     if width < min_list_width + min_sidebar_width + divider_width + 1:
         return width, 0
 
-    sidebar_width = min(52, max(min_sidebar_width, width // 2 - 2))
-    list_width = width - sidebar_width - divider_width
-    if list_width < min_list_width:
-        sidebar_width = width - min_list_width - divider_width
-        list_width = width - sidebar_width - divider_width
+    available_width = width - divider_width
+    list_width = available_width // 2
+    sidebar_width = available_width - list_width
     if list_width < min_list_width or sidebar_width < min_sidebar_width:
         return width, 0
     return list_width, sidebar_width
+
+
+def curses_color_number(color: int | None) -> int:
+    if color is None:
+        return -1
+    return {
+        0: curses.COLOR_BLACK,
+        1: curses.COLOR_RED,
+        2: curses.COLOR_GREEN,
+        3: curses.COLOR_YELLOW,
+        4: curses.COLOR_BLUE,
+        5: curses.COLOR_MAGENTA,
+        6: curses.COLOR_CYAN,
+        7: curses.COLOR_WHITE,
+    }.get(color, -1)
 
 
 def safe_addnstr(
@@ -913,6 +1062,73 @@ def safe_addnstr(
         stdscr.addnstr(y, x, text, width, attr)
     except curses.error:
         pass
+
+
+def ansi_style_attr(
+    style: AnsiStyle,
+    color_pairs: dict[tuple[int | None, int | None], int],
+    next_pair: list[int],
+) -> int:
+    attr = curses.A_NORMAL
+    if style.bold:
+        attr |= curses.A_BOLD
+    if style.dim:
+        attr |= curses.A_DIM
+    if style.reverse:
+        attr |= curses.A_REVERSE
+
+    color_key = (style.fg, style.bg)
+    if style.fg is None and style.bg is None:
+        return attr
+
+    pair_number = color_pairs.get(color_key)
+    if pair_number is None:
+        try:
+            pair_number = next_pair[0]
+            curses.init_pair(
+                pair_number,
+                curses_color_number(style.fg),
+                curses_color_number(style.bg),
+            )
+            color_pairs[color_key] = pair_number
+            next_pair[0] += 1
+        except curses.error:
+            return attr
+    return attr | curses.color_pair(pair_number)
+
+
+def render_ansi_line(
+    stdscr: curses.window,
+    y: int,
+    x: int,
+    text: str,
+    width: int,
+    color_pairs: dict[tuple[int | None, int | None], int],
+    next_pair: list[int],
+) -> None:
+    if width <= 0:
+        return
+
+    cursor = x
+    remaining = width
+    for chunk, style in parse_ansi_segments(text):
+        if remaining <= 0:
+            break
+        if not chunk:
+            continue
+        rendered = chunk[:remaining]
+        safe_addnstr(
+            stdscr,
+            y,
+            cursor,
+            rendered,
+            len(rendered),
+            ansi_style_attr(style, color_pairs, next_pair),
+        )
+        cursor += len(rendered)
+        remaining -= len(rendered)
+    if remaining > 0:
+        safe_addnstr(stdscr, y, cursor, " " * remaining, remaining)
 
 
 def append_detail(lines: list[str], label: str, value: str | None, width: int) -> None:
@@ -1009,6 +1225,8 @@ def run_picker(records: list[SessionRecord]) -> int:
         dim_attr = curses.A_DIM
         title_attr = curses.A_BOLD
         header_attr = curses.A_BOLD
+        color_pairs: dict[tuple[int | None, int | None], int] = {}
+        next_color_pair = [10]
         selected = selectable[0] if selectable else None
         top = 0
         message = "Enter focus  j/k move  q/Esc cancel"
@@ -1097,24 +1315,38 @@ def run_picker(records: list[SessionRecord]) -> int:
             if divider_x is not None:
                 for y in range(1, footer_y):
                     safe_addnstr(stdscr, y, divider_x, "|", 1, dim_attr)
-                if selected_rec is not None:
-                    detail_lines = build_picker_details(
-                        selected_rec,
-                        max(20, sidebar_width),
-                        pane_preview=selected_preview,
-                    )
-                else:
-                    detail_lines = [
-                        "No focusable tmux target for the visible sessions."
-                    ]
-                for index, line in enumerate(detail_lines[: footer_y - row_start]):
+                if selected_rec is None:
                     safe_addnstr(
                         stdscr,
-                        row_start + index,
+                        row_start,
                         sidebar_x,
-                        line.ljust(sidebar_width),
+                        "No focusable tmux target for the visible sessions.".ljust(
+                            sidebar_width
+                        ),
                         sidebar_width,
                     )
+                elif not selected_preview:
+                    safe_addnstr(
+                        stdscr,
+                        row_start,
+                        sidebar_x,
+                        "Preview unavailable.".ljust(sidebar_width),
+                        sidebar_width,
+                        dim_attr,
+                    )
+                else:
+                    for index, line in enumerate(
+                        selected_preview[: footer_y - row_start]
+                    ):
+                        render_ansi_line(
+                            stdscr,
+                            row_start + index,
+                            sidebar_x,
+                            line,
+                            sidebar_width,
+                            color_pairs,
+                            next_color_pair,
+                        )
 
             if not selectable:
                 message = "No tmux-mapped sessions available. Press q to exit."

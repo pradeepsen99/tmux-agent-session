@@ -162,6 +162,7 @@ def test_capture_tmux_pane_preview_uses_pane_id_and_limits_output(monkeypatch) -
             "tmux",
             "capture-pane",
             "-p",
+            "-e",
             "-t",
             "%3",
             "-S",
@@ -241,6 +242,25 @@ def test_picker_split_widths_uses_sidebar_only_when_terminal_is_wide_enough() ->
     assert cli.picker_split_widths(78) == (78, 0)
 
     list_width, sidebar_width = cli.picker_split_widths(100)
-    assert list_width >= 44
-    assert sidebar_width >= 32
+    assert list_width == 49
+    assert sidebar_width == 49
     assert list_width + sidebar_width + 2 == 100
+
+
+def test_parse_ansi_segments_tracks_style_changes() -> None:
+    segments = cli.parse_ansi_segments("plain \x1b[31mred\x1b[0m done")
+
+    assert segments[0][0] == "plain "
+    assert segments[0][1] == cli.AnsiStyle()
+    assert segments[1][0] == "red"
+    assert segments[1][1].fg == 1
+    assert segments[2][0] == " done"
+    assert segments[2][1] == cli.AnsiStyle()
+
+
+def test_apply_ansi_sgr_supports_256_color_sequences() -> None:
+    style = cli.apply_ansi_sgr(cli.AnsiStyle(), "38;5;196;48;5;21;1")
+
+    assert style.fg is not None
+    assert style.bg is not None
+    assert style.bold is True
