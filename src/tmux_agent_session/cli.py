@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import __version__
+
 
 DEFAULT_CODEX_DIR = Path("~/.codex/sessions").expanduser()
 DEFAULT_OPENCODE_DIRS = [
@@ -1097,6 +1099,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--include-stale", action="store_true", help="include stale sessions"
     )
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return p
 
 

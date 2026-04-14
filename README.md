@@ -39,6 +39,33 @@ uv run tas --help
 uv run python -m tmux_agent_session --help
 ```
 
+## Homebrew
+
+For Homebrew, publish tagged releases from this repository and install through a custom tap.
+
+1. Create a GitHub release such as `v0.1.0`.
+2. Copy `packaging/homebrew/tmux-agent-session.rb` into a tap repo at `Formula/tmux-agent-session.rb`.
+3. Replace `YOUR_GITHUB_USER` and `REPLACE_WITH_RELEASE_TARBALL_SHA256` in the formula.
+4. Install from the tap:
+
+```bash
+brew tap YOUR_GITHUB_USER/tap
+brew install tmux-agent-session
+```
+
+Generate the release tarball checksum with:
+
+```bash
+curl -L -o tmux-agent-session.tar.gz https://github.com/YOUR_GITHUB_USER/tmux-agent-session/archive/refs/tags/v0.1.0.tar.gz
+shasum -a 256 tmux-agent-session.tar.gz
+```
+
+The CLI exposes `--version`, which gives Homebrew a stable test target:
+
+```bash
+uv run tmux-agent-session --version
+```
+
 ## Usage
 
 List active or recent sessions:
