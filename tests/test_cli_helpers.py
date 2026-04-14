@@ -264,3 +264,17 @@ def test_apply_ansi_sgr_supports_256_color_sequences() -> None:
     assert style.fg is not None
     assert style.bg is not None
     assert style.bold is True
+
+
+def test_apply_ansi_sgr_supports_truecolor_sequences() -> None:
+    style = cli.apply_ansi_sgr(cli.AnsiStyle(), "38;2;255;255;255;48;2;42;43;60")
+
+    assert style.fg == 7
+    assert style.bg is not None
+    assert style.dim is False
+
+
+def test_parse_ansi_segments_supports_truecolor_backgrounds() -> None:
+    segments = cli.parse_ansi_segments("\x1b[48;2;42;43;60mX\x1b[0m")
+
+    assert segments == [("X", cli.AnsiStyle(bg=0))]

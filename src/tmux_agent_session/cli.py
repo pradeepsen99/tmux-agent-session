@@ -571,6 +571,14 @@ def ansi_color_from_256(code: int) -> tuple[int | None, bool]:
         gray = 8 + (code - 232) * 10
         r = g = b = gray
 
+    return ansi_color_from_rgb(r, g, b)
+
+
+def ansi_color_from_rgb(r: int, g: int, b: int) -> tuple[int | None, bool]:
+    r = max(0, min(255, r))
+    g = max(0, min(255, g))
+    b = max(0, min(255, b))
+
     palette = {
         0: (0, 0, 0),
         1: (205, 49, 49),
@@ -628,14 +636,25 @@ def apply_ansi_sgr(style: AnsiStyle, sgr: str) -> AnsiStyle:
             current.bold = True
         elif 100 <= code <= 107:
             current.bg = code - 100
-        elif code in {38, 48} and index + 2 < len(codes) and codes[index + 1] == 5:
-            mapped, is_bright = ansi_color_from_256(codes[index + 2])
-            if code == 38:
-                current.fg = mapped
-                current.bold = current.bold or is_bright
-            else:
-                current.bg = mapped
-            index += 2
+        elif code in {38, 48}:
+            if index + 4 < len(codes) and codes[index + 1] == 2:
+                mapped, is_bright = ansi_color_from_rgb(
+                    codes[index + 2], codes[index + 3], codes[index + 4]
+                )
+                if code == 38:
+                    current.fg = mapped
+                    current.bold = current.bold or is_bright
+                else:
+                    current.bg = mapped
+                index += 4
+            elif index + 2 < len(codes) and codes[index + 1] == 5:
+                mapped, is_bright = ansi_color_from_256(codes[index + 2])
+                if code == 38:
+                    current.fg = mapped
+                    current.bold = current.bold or is_bright
+                else:
+                    current.bg = mapped
+                index += 2
         index += 1
     return current
 
