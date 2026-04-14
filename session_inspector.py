@@ -15,9 +15,9 @@ authoritative live-session registry for outside tools.
 from __future__ import annotations
 
 import argparse
+import curses
 import datetime as dt
 import json
-import os
 import re
 import shlex
 import subprocess
@@ -48,6 +48,17 @@ class ProcessInfo:
 
 
 @dataclass
+class TmuxPane:
+    session_name: str
+    window_index: str
+    window_name: str
+    pane_index: str
+    pane_id: str
+    pane_tty: str | None
+    pane_current_path: str | None = None
+
+
+@dataclass
 class SessionRecord:
     tool: str
     session_id: str
@@ -56,6 +67,7 @@ class SessionRecord:
     cwd: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     matched_process: ProcessInfo | None = None
+    tmux_pane: TmuxPane | None = None
     score: int = 0
     status: str = "stale"
     reasons: list[str] = field(default_factory=list)
@@ -111,6 +123,12 @@ def get_cwd(pid: int) -> str | None:
     return None
 
 
+def normalize_tty(value: str | None) -> str | None:
+    if not value:
+        return None
+    return value.removeprefix("/dev/")
+
+
 def extract_session_ids(command: str) -> list[str]:
     found: list[str] = []
     for pat in SESSION_ID_PATTERNS:
@@ -157,6 +175,47 @@ def detect_processes() -> list[ProcessInfo]:
             )
         )
     return processes
+
+
+def detect_tmux_panes() -> list[TmuxPane]:
+    output = run_command(
+        [
+            "tmux",
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_tty}\t#{pane_current_path}",
+        ]
+    )
+    panes: list[TmuxPane] = []
+    for raw_line in output.splitlines():
+        line = raw_line.rstrip("\n")
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) != 7:
+            continue
+        (
+            session_name,
+            window_index,
+            window_name,
+            pane_index,
+            pane_id,
+            pane_tty,
+            pane_current_path,
+        ) = parts
+        panes.append(
+            TmuxPane(
+                session_name=session_name,
+                window_index=window_index,
+                window_name=window_name,
+                pane_index=pane_index,
+                pane_id=pane_id,
+                pane_tty=normalize_tty(pane_tty),
+                pane_current_path=normalize_cwd(pane_current_path),
+            )
+        )
+    return panes
 
 
 def safe_mtime(path: Path) -> float | None:
@@ -401,6 +460,44 @@ def add_process_only_records(
     return records
 
 
+def attach_tmux_panes(records: list[SessionRecord], panes: list[TmuxPane]) -> None:
+    panes_by_tty = {pane.pane_tty: pane for pane in panes if pane.pane_tty is not None}
+    for rec in records:
+        if rec.matched_process is None:
+            continue
+        rec.tmux_pane = panes_by_tty.get(normalize_tty(rec.matched_process.tty))
+
+
+def tmux_target(rec: SessionRecord) -> str:
+    if rec.tmux_pane is None:
+        return "—"
+    return (
+        f"{rec.tmux_pane.session_name}:{rec.tmux_pane.window_index}."
+        f"{rec.tmux_pane.pane_index}"
+    )
+
+
+def focus_tmux_pane(rec: SessionRecord) -> bool:
+    if rec.tmux_pane is None:
+        return False
+
+    commands = [
+        ["tmux", "switch-client", "-t", rec.tmux_pane.session_name],
+        [
+            "tmux",
+            "select-window",
+            "-t",
+            f"{rec.tmux_pane.session_name}:{rec.tmux_pane.window_index}",
+        ],
+        ["tmux", "select-pane", "-t", rec.tmux_pane.pane_id],
+    ]
+    for cmd in commands:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            return False
+    return True
+
+
 def age_minutes(ts: float | None) -> float | None:
     if ts is None:
         return None
@@ -471,8 +568,21 @@ def truncate(text: str | None, width: int) -> str:
     return text[: width - 1] + "…"
 
 
+def pad(text: str | None, width: int) -> str:
+    return truncate(text, width).ljust(width)
+
+
 def print_table(records: list[SessionRecord]) -> None:
-    headers = ["TOOL", "STATUS", "PID", "TTY", "CWD", "SESSION_ID", "LAST_WRITE"]
+    headers = [
+        "TOOL",
+        "STATUS",
+        "PID",
+        "TTY",
+        "TARGET",
+        "CWD",
+        "SESSION_ID",
+        "LAST_WRITE",
+    ]
     rows = []
     for rec in records:
         rows.append(
@@ -483,6 +593,7 @@ def print_table(records: list[SessionRecord]) -> None:
                 rec.matched_process.tty
                 if rec.matched_process and rec.matched_process.tty
                 else "—",
+                tmux_target(rec),
                 truncate(
                     rec.cwd
                     or (rec.matched_process.cwd if rec.matched_process else None),
@@ -517,6 +628,17 @@ def print_json(records: list[SessionRecord]) -> None:
                 "cwd": rec.cwd,
                 "score": rec.score,
                 "reasons": rec.reasons,
+                "tmux": None
+                if rec.tmux_pane is None
+                else {
+                    "session_name": rec.tmux_pane.session_name,
+                    "window_index": rec.tmux_pane.window_index,
+                    "window_name": rec.tmux_pane.window_name,
+                    "pane_index": rec.tmux_pane.pane_index,
+                    "pane_id": rec.tmux_pane.pane_id,
+                    "pane_tty": rec.tmux_pane.pane_tty,
+                    "target": tmux_target(rec),
+                },
                 "process": None
                 if rec.matched_process is None
                 else {
@@ -546,6 +668,159 @@ def sort_records(records: list[SessionRecord]) -> list[SessionRecord]:
     )
 
 
+def build_records(args: argparse.Namespace) -> list[SessionRecord]:
+    opencode_dirs = args.opencode_dir or DEFAULT_OPENCODE_DIRS
+
+    processes = detect_processes()
+    panes = detect_tmux_panes()
+    records: list[SessionRecord] = []
+
+    if args.tool in ("all", "codex"):
+        records.extend(load_sessions("codex", [args.codex_dir]))
+    if args.tool in ("all", "opencode"):
+        records.extend(load_sessions("opencode", opencode_dirs))
+
+    for rec in records:
+        score_session(rec, processes, args.active_minutes, args.recent_hours)
+
+    records = add_process_only_records(records, processes)
+    attach_tmux_panes(records, panes)
+    records = sort_records(records)
+
+    if not args.include_stale:
+        records = [r for r in records if r.status != "stale"]
+
+    return records
+
+
+def move_selection(current: int | None, selectable: list[int], step: int) -> int | None:
+    if not selectable:
+        return None
+    if current is None or current not in selectable:
+        return selectable[0]
+
+    position = selectable.index(current)
+    position = max(0, min(len(selectable) - 1, position + step))
+    return selectable[position]
+
+
+def render_picker_line(rec: SessionRecord, width: int) -> str:
+    target_width = 10
+    tool_width = 9
+    status_width = 8
+    session_width = 24
+    fixed = tool_width + status_width + target_width + session_width + 8
+    cwd_width = max(12, width - fixed)
+    return "  ".join(
+        [
+            pad(rec.tool, tool_width),
+            pad(rec.status, status_width),
+            pad(tmux_target(rec), target_width),
+            pad(rec.session_id, session_width),
+            truncate(
+                rec.cwd or (rec.matched_process.cwd if rec.matched_process else None),
+                cwd_width,
+            ),
+        ]
+    )[:width]
+
+
+def safe_addnstr(
+    stdscr: curses.window, y: int, x: int, text: str, width: int, attr: int = 0
+) -> None:
+    if width <= 0:
+        return
+    try:
+        stdscr.addnstr(y, x, text, width, attr)
+    except curses.error:
+        pass
+
+
+def run_picker(records: list[SessionRecord]) -> int:
+    selectable = [i for i, rec in enumerate(records) if rec.tmux_pane is not None]
+
+    def inner(stdscr: curses.window) -> int:
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        stdscr.keypad(True)
+        try:
+            curses.use_default_colors()
+        except curses.error:
+            pass
+
+        highlight_attr = curses.A_REVERSE
+        dim_attr = curses.A_DIM
+        normal_attr = curses.A_NORMAL
+        selected = selectable[0] if selectable else None
+        top = 0
+        message = "Enter: focus pane  q/Esc: cancel"
+
+        while True:
+            height, width = stdscr.getmaxyx()
+            list_height = max(1, height - 3)
+            if selected is not None:
+                if selected < top:
+                    top = selected
+                elif selected >= top + list_height:
+                    top = selected - list_height + 1
+            else:
+                top = 0
+
+            stdscr.erase()
+            title = "Session picker"
+            safe_addnstr(stdscr, 0, 0, title.ljust(width), width)
+            for row, record_index in enumerate(
+                range(top, min(len(records), top + list_height)), start=1
+            ):
+                rec = records[record_index]
+                attr = normal_attr
+                if rec.tmux_pane is None:
+                    attr = dim_attr
+                elif record_index == selected:
+                    attr = highlight_attr
+                safe_addnstr(
+                    stdscr, row, 0, render_picker_line(rec, width), width, attr
+                )
+
+            if not selectable:
+                message = "No tmux-mapped sessions available. Press q to exit."
+            footer = message
+            safe_addnstr(
+                stdscr,
+                max(0, height - 1),
+                0,
+                truncate(footer, width).ljust(width),
+                width,
+                dim_attr,
+            )
+            stdscr.refresh()
+
+            key = stdscr.getch()
+            if key in (ord("q"), 27):
+                return 1
+            if key in (curses.KEY_UP, ord("k")):
+                selected = move_selection(selected, selectable, -1)
+                continue
+            if key in (curses.KEY_DOWN, ord("j")):
+                selected = move_selection(selected, selectable, 1)
+                continue
+            if key in (10, 13, curses.KEY_ENTER):
+                if selected is None:
+                    message = "No focusable tmux target for the visible sessions."
+                    continue
+                if focus_tmux_pane(records[selected]):
+                    return 0
+                message = f"Failed to focus {tmux_target(records[selected])}."
+
+    try:
+        return curses.wrapper(inner)
+    except curses.error as exc:
+        print(f"picker failed: {exc}", file=sys.stderr)
+        return 1
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="List likely active Codex and OpenCode sessions"
@@ -565,6 +840,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--json", action="store_true", help="emit JSON")
     p.add_argument(
+        "--pick",
+        action="store_true",
+        help="open an interactive picker and focus the selected tmux pane",
+    )
+    p.add_argument(
         "--show-reasons", action="store_true", help="show why each row was classified"
     )
     p.add_argument("--codex-dir", type=Path, default=DEFAULT_CODEX_DIR)
@@ -576,26 +856,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    args = build_arg_parser().parse_args()
-    opencode_dirs = args.opencode_dir or DEFAULT_OPENCODE_DIRS
+    parser = build_arg_parser()
+    args = parser.parse_args()
 
-    processes = detect_processes()
-    records: list[SessionRecord] = []
+    if args.pick and args.json:
+        parser.error("--pick cannot be combined with --json")
 
-    if args.tool in ("all", "codex"):
-        records.extend(load_sessions("codex", [args.codex_dir]))
-    if args.tool in ("all", "opencode"):
-        records.extend(load_sessions("opencode", opencode_dirs))
+    records = build_records(args)
 
-    for rec in records:
-        score_session(rec, processes, args.active_minutes, args.recent_hours)
-
-    records = add_process_only_records(records, processes)
-
-    records = sort_records(records)
-    if not args.include_stale:
-        records = [r for r in records if r.status != "stale"]
-
+    if args.pick:
+        return run_picker(records)
     if args.json:
         print_json(records)
     else:
