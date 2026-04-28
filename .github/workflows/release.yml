@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: src
+      RELEASE_REPOSITORY: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      HOMEBREW_TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO }}
+      HOMEBREW_TAP_FORMULA_PATH: ${{ vars.HOMEBREW_TAP_FORMULA_PATH }}
+      TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Validate release tag
+        run: python -m tmux_agent_session.release ensure-tag-match --tag "$RELEASE_TAG"
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Run tests
+        run: uv run pytest
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Download GitHub source archive
+        run: |
+          mkdir -p .release
+          curl -fsSL -o ".release/${RELEASE_TAG}.tar.gz" "https://github.com/${RELEASE_REPOSITORY}/archive/refs/tags/${RELEASE_TAG}.tar.gz"
+
+      - name: Compute Homebrew source checksum
+        id: archive
+        run: |
+          checksum=$(python -m tmux_agent_session.release sha256 --file ".release/${RELEASE_TAG}.tar.gz")
+          printf 'sha256=%s\n' "$checksum" >> "$GITHUB_OUTPUT"
+
+      - name: Render Homebrew formula
+        run: |
+          python -m tmux_agent_session.release render-homebrew-formula \
+            --repository "$RELEASE_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --sha256 "${{ steps.archive.outputs.sha256 }}" \
+            --output packaging/homebrew/tmux-agent-session.rb
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*
+            packaging/homebrew/tmux-agent-session.rb
+
+      - name: Check out Homebrew tap repository
+        if: env.HOMEBREW_TAP_REPO != '' && env.TAP_GITHUB_TOKEN != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.HOMEBREW_TAP_REPO }}
+          token: ${{ env.TAP_GITHUB_TOKEN }}
+          path: homebrew-tap
+
+      - name: Copy formula into Homebrew tap
+        if: env.HOMEBREW_TAP_REPO != '' && env.TAP_GITHUB_TOKEN != ''
+        run: |
+          formula_path="${HOMEBREW_TAP_FORMULA_PATH:-Formula/tmux-agent-session.rb}"
+          mkdir -p "homebrew-tap/$(dirname "$formula_path")"
+          cp packaging/homebrew/tmux-agent-session.rb "homebrew-tap/$formula_path"
+
+      - name: Commit Homebrew tap update
+        if: env.HOMEBREW_TAP_REPO != '' && env.TAP_GITHUB_TOKEN != ''
+        run: |
+          cd homebrew-tap
+
+          if [ -z "$(git status --short)" ]; then
+            printf '%s\n' "Homebrew tap already up to date."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "brew: update tmux-agent-session to ${RELEASE_TAG}"
+          git push
+
+      - name: Note skipped Homebrew tap publish
+        if: env.HOMEBREW_TAP_REPO == '' || env.TAP_GITHUB_TOKEN == ''
+        run: |
+          printf '%s\n' "Homebrew tap publish skipped. Set HOMEBREW_TAP_REPO and TAP_GITHUB_TOKEN to enable automatic tap updates." >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,54 @@
+name: Release Dispatch
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag to create, for example v0.2.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate requested release tag
+        env:
+          PYTHONPATH: src
+        run: python -m tmux_agent_session.release ensure-tag-match --tag "${{ inputs.version }}"
+
+      - name: Fail if tag already exists
+        run: |
+          if git rev-parse "${{ inputs.version }}" >/dev/null 2>&1; then
+            printf '%s\n' "Tag ${{ inputs.version }} already exists locally."
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${{ inputs.version }}" >/dev/null 2>&1; then
+            printf '%s\n' "Tag ${{ inputs.version }} already exists on origin."
+            exit 1
+          fi
+
+      - name: Configure git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create and push release tag
+        run: |
+          git tag -a "${{ inputs.version }}" -m "Release ${{ inputs.version }}"
+          git push origin "${{ inputs.version }}"

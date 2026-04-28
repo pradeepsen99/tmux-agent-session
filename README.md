@@ -41,22 +41,56 @@ uv run python -m tmux_agent_session --help
 
 ## Homebrew
 
-For Homebrew, publish tagged releases from this repository and install through a custom tap.
+Tagged releases generate a fresh `packaging/homebrew/tmux-agent-session.rb` formula and upload it as a GitHub release asset.
 
-1. Create a GitHub release such as `v0.1.0`.
-2. Copy `packaging/homebrew/tmux-agent-session.rb` into a tap repo at `Formula/tmux-agent-session.rb`.
-3. Replace `YOUR_GITHUB_USER` and `REPLACE_WITH_RELEASE_TARBALL_SHA256` in the formula.
-4. Install from the tap:
+To publish into a separate tap automatically, configure these repository settings:
+
+- Repository variable `HOMEBREW_TAP_REPO`, for example `pradeepsen99/homebrew-tap`
+- Optional repository variable `HOMEBREW_TAP_FORMULA_PATH`, default `Formula/tmux-agent-session.rb`
+- Repository secret `TAP_GITHUB_TOKEN` with write access to the tap repo
+
+Without those settings, the workflow still publishes the formula as a release asset so you can copy it into a tap manually.
+
+Install from a tap with:
 
 ```bash
 brew tap YOUR_GITHUB_USER/tap
 brew install tmux-agent-session
 ```
 
-Generate the release tarball checksum with:
+## Releases
+
+Two release paths are supported.
+
+Release from GitHub Actions:
 
 ```bash
-curl -L -o tmux-agent-session.tar.gz https://github.com/YOUR_GITHUB_USER/tmux-agent-session/archive/refs/tags/v0.1.0.tar.gz
+make release-dispatch VERSION=v0.2.0
+```
+
+That calls the `Release Dispatch` workflow, which validates the version in `src/tmux_agent_session/__init__.py`, creates the annotated tag, and pushes it. The tag push then triggers the `Release` workflow.
+
+Release from a local tag:
+
+```bash
+make release-tag VERSION=v0.2.0
+```
+
+That validates the version, creates an annotated local tag, and pushes it to GitHub. The pushed tag triggers the same `Release` workflow.
+
+The release workflow does the following:
+
+- validates that the tag matches the package version
+- runs `uv run pytest`
+- builds wheel and sdist artifacts with `uv build`
+- creates the GitHub release and uploads the built artifacts
+- renders a Homebrew formula using the GitHub tag archive checksum
+- optionally pushes that formula into a separate Homebrew tap repo
+
+For manual checksum generation outside the workflow:
+
+```bash
+curl -L -o tmux-agent-session.tar.gz https://github.com/pradeepsen99/tmux-agent-session/archive/refs/tags/v0.1.0.tar.gz
 shasum -a 256 tmux-agent-session.tar.gz
 ```
 
