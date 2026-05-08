@@ -66,6 +66,45 @@ def test_build_records_filters_stale_and_honors_tool_selection(monkeypatch) -> N
     assert [rec.session_id for rec in records] == ["active"]
 
 
+def test_build_records_filters_process_only_records_by_tool(monkeypatch) -> None:
+    codex_proc = cli.ProcessInfo(
+        pid=1,
+        ppid=0,
+        tty="ttys001",
+        etime_seconds=30,
+        cwd="/tmp/codex",
+        command="codex",
+        tool="codex",
+    )
+    opencode_proc = cli.ProcessInfo(
+        pid=2,
+        ppid=0,
+        tty="ttys002",
+        etime_seconds=30,
+        cwd="/tmp/opencode",
+        command="opencode",
+        tool="opencode",
+    )
+
+    monkeypatch.setattr(cli, "detect_processes", lambda: [codex_proc, opencode_proc])
+    monkeypatch.setattr(cli, "detect_tmux_panes", lambda: [])
+    monkeypatch.setattr(cli, "load_sessions", lambda _tool, _paths: [])
+
+    args = argparse.Namespace(
+        tool="codex",
+        codex_dir=cli.DEFAULT_CODEX_DIR,
+        opencode_dir=[],
+        active_minutes=10,
+        recent_hours=12,
+        include_stale=False,
+    )
+
+    records = cli.build_records(args)
+
+    assert [rec.tool for rec in records] == ["codex"]
+    assert [rec.session_id for rec in records] == ["pid-1"]
+
+
 def test_main_prints_table_and_reasons(monkeypatch, capsys) -> None:
     rec = cli.SessionRecord(
         tool="codex",
