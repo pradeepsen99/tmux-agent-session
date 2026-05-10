@@ -9,13 +9,6 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .ansi import (
-    ANSI_SGR_RE,
-    ansi_color_from_256,
-    ansi_color_from_rgb,
-    apply_ansi_sgr,
-    parse_ansi_segments,
-)
 from .commands import run_command
 from .formatting import (
     PICKER_METADATA_PRIMARY,
@@ -37,19 +30,18 @@ from .formatting import (
 from .harnesses import load_sessions as _load_harness_sessions
 from .harnesses.codex import DEFAULT_CODEX_DIR, extract_codex_session
 from .harnesses.opencode import DEFAULT_OPENCODE_DIRS, extract_opencode_sessions
-from .models import AnsiStyle, ProcessInfo, SessionRecord, TmuxPane
+from .models import ProcessInfo, SessionRecord, TmuxPane
 from .picker import (
-    ansi_style_attr,
+    SessionPickerApp,
     append_detail,
     build_picker_details,
-    curses_color_number,
+    first_focusable_index,
     move_selection,
-    picker_split_widths,
-    render_ansi_line,
-    render_picker_header,
-    render_picker_line,
+    picker_detail_items,
+    picker_details_renderable,
+    picker_row_cells,
+    rich_picker_row_cells,
     run_picker,
-    safe_addnstr,
 )
 from .processes import (
     SESSION_ID_PATTERNS,
@@ -137,7 +129,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--pick",
         action="store_true",
-        help="open an interactive picker and focus the selected tmux pane",
+        help="open the Textual picker and focus the selected tmux pane",
     )
     p.add_argument(
         "--show-reasons", action="store_true", help="show why each row was classified"

@@ -4,7 +4,9 @@ dynamic = ["version"]
 description = "Inspect and jump to active Codex and OpenCode tmux sessions"
 readme = "README.md"
 requires-python = ">=3.9"
-dependencies = []
+dependencies = [
+    "textual>=8.2.5,<9",
+]
 
 [dependency-groups]
 dev = [

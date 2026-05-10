@@ -20,6 +20,7 @@ This tool is intentionally heuristic. It does not depend on an official live ses
 - `tmux`
 - `ps`
 - `lsof`
+- Textual, which brings Rich for terminal rendering, installed automatically from the project dependencies
 
 The tool works best on systems where those commands are available and session metadata is present in the default Codex/OpenCode storage locations.
 
@@ -102,7 +103,7 @@ uv run tmux-agent-session --version
 
 ## Usage
 
-List active or recent sessions:
+List active or recent sessions with the Rich-rendered table output:
 
 ```bash
 uv run tmux-agent-session
@@ -114,11 +115,13 @@ Emit machine-readable JSON:
 uv run tas --json
 ```
 
-Open the interactive picker and jump to the selected tmux pane:
+Open the Textual interactive picker and jump to the selected tmux pane:
 
 ```bash
 uv run tas --pick
 ```
+
+The picker supports native table navigation with arrow keys, `j`/`k`, `Enter` to focus a tmux-backed row, and `q` or `Esc` to quit.
 
 Inspect a single tool:
 

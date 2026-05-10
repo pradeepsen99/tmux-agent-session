@@ -4,6 +4,11 @@ import datetime as dt
 import json
 from typing import Any
 
+from rich import box
+from rich.console import Console
+from rich.table import Table
+from rich.text import Text
+
 from .models import SessionRecord
 from .tmux import tmux_target
 
@@ -145,47 +150,73 @@ def display_model(rec: SessionRecord) -> str | None:
     return provider
 
 
-def print_table(records: list[SessionRecord]) -> None:
-    headers = [
-        "TOOL",
-        "STATUS",
-        "PID",
-        "TTY",
-        "TARGET",
-        "CWD",
-        "SESSION_ID",
-        "LAST_WRITE",
-    ]
-    rows = []
+STATUS_STYLES = {
+    "active": "bold green",
+    "recent": "yellow",
+    "stale": "dim cyan",
+}
+
+
+def status_text(status: str) -> Text:
+    return Text(status, style=STATUS_STYLES.get(status, ""))
+
+
+def process_summary(rec: SessionRecord) -> str:
+    if rec.matched_process is None:
+        return "—"
+    parts = [f"pid {rec.matched_process.pid}"]
+    if rec.matched_process.tty:
+        parts.append(rec.matched_process.tty)
+    runtime = format_duration(rec.matched_process.etime_seconds)
+    if runtime != "—":
+        parts.append(runtime)
+    return " ".join(parts)
+
+
+def record_details(rec: SessionRecord) -> str:
+    details: list[str] = []
+    model = display_model(rec)
+    if model:
+        details.append(f"model {model}")
+    process = process_summary(rec)
+    if process != "—":
+        details.append(process)
+    updated = format_ts(rec.last_write)
+    if updated != "—":
+        details.append(updated)
+    summary = first_metadata_value(rec, ("summary", "title"))
+    if summary:
+        details.append(summary)
+    return " | ".join(details) if details else "—"
+
+
+def print_table(
+    records: list[SessionRecord], console: Console | None = None
+) -> None:
+    table = Table(
+        box=box.ASCII,
+        expand=True,
+        show_lines=False,
+        header_style="bold",
+    )
+    table.add_column("TOOL", no_wrap=True)
+    table.add_column("STATUS", no_wrap=True)
+    table.add_column("TARGET", no_wrap=True)
+    table.add_column("SESSION_ID", no_wrap=True, max_width=24, overflow="ellipsis")
+    table.add_column("CWD", ratio=1, min_width=10, overflow="ellipsis")
+    table.add_column("DETAILS", ratio=2, min_width=18, overflow="fold")
+
     for rec in records:
-        rows.append(
-            [
-                rec.tool,
-                rec.status,
-                str(rec.matched_process.pid) if rec.matched_process else "—",
-                rec.matched_process.tty
-                if rec.matched_process and rec.matched_process.tty
-                else "—",
-                tmux_target(rec),
-                truncate(
-                    rec.cwd
-                    or (rec.matched_process.cwd if rec.matched_process else None),
-                    28,
-                ),
-                truncate(rec.session_id, 22),
-                format_ts(rec.last_write),
-            ]
+        table.add_row(
+            rec.tool,
+            status_text(rec.status),
+            tmux_target(rec),
+            rec.session_id,
+            display_cwd(rec) or "—",
+            record_details(rec),
         )
 
-    widths = (
-        [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
-        if rows
-        else [len(h) for h in headers]
-    )
-    print("  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
-    print("  ".join("-" * widths[i] for i in range(len(headers))))
-    for row in rows:
-        print("  ".join(row[i].ljust(widths[i]) for i in range(len(headers))))
+    (console or Console()).print(table)
 
 
 def print_json(records: list[SessionRecord]) -> None:

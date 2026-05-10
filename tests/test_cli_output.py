@@ -48,6 +48,8 @@ def test_print_table_outputs_headers_and_row(capsys) -> None:
     assert "STATUS" in out
     assert "abc123" in out
     assert "work:1.2" in out
+    assert "gpt-5" in out
+    assert "Investigate" in out
 
 
 def test_print_json_outputs_process_and_tmux_blocks(capsys) -> None:

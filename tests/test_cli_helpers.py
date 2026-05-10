@@ -217,7 +217,7 @@ def test_move_selection_handles_empty_unknown_and_bounds() -> None:
     assert cli.move_selection(1, [], 1) is None
 
 
-def test_render_picker_line_and_header_include_expected_columns() -> None:
+def test_picker_row_cells_include_expected_columns() -> None:
     rec = cli.SessionRecord(
         tool="codex",
         session_id="session-1",
@@ -228,53 +228,58 @@ def test_render_picker_line_and_header_include_expected_columns() -> None:
         status="active",
     )
 
-    line = cli.render_picker_line(rec, 120)
-    header = cli.render_picker_header(120)
+    cells = cli.picker_row_cells(rec)
 
-    assert "active" in line
-    assert "codex" in line
-    assert "gpt-5" in line
-    assert "STATUS" in header
-    assert "TOOL" in header
-
-
-def test_picker_split_widths_uses_sidebar_only_when_terminal_is_wide_enough() -> None:
-    assert cli.picker_split_widths(78) == (78, 0)
-
-    list_width, sidebar_width = cli.picker_split_widths(100)
-    assert list_width == 49
-    assert sidebar_width == 49
-    assert list_width + sidebar_width + 2 == 100
+    assert cells == (
+        "active",
+        "codex",
+        "—",
+        "gpt-5",
+        "session-1",
+        "/tmp/project",
+    )
+    assert cli.PICKER_METADATA_PRIMARY[0][0] == "Model"
 
 
-def test_parse_ansi_segments_tracks_style_changes() -> None:
-    segments = cli.parse_ansi_segments("plain \x1b[31mred\x1b[0m done")
+def test_first_focusable_index_prefers_tmux_backed_records() -> None:
+    plain = cli.SessionRecord(
+        tool="codex",
+        session_id="plain",
+        path=None,
+        last_write=None,
+    )
+    focusable = cli.SessionRecord(
+        tool="codex",
+        session_id="focusable",
+        path=None,
+        last_write=None,
+        tmux_pane=cli.TmuxPane(
+            session_name="work",
+            window_index="1",
+            window_name="editor",
+            pane_index="2",
+            pane_id="%3",
+            pane_tty="ttys001",
+        ),
+    )
 
-    assert segments[0][0] == "plain "
-    assert segments[0][1] == cli.AnsiStyle()
-    assert segments[1][0] == "red"
-    assert segments[1][1].fg == 1
-    assert segments[2][0] == " done"
-    assert segments[2][1] == cli.AnsiStyle()
+    assert cli.first_focusable_index([plain, focusable]) == 1
+    assert cli.first_focusable_index([plain]) == 0
+    assert cli.first_focusable_index([]) is None
 
 
-def test_apply_ansi_sgr_supports_256_color_sequences() -> None:
-    style = cli.apply_ansi_sgr(cli.AnsiStyle(), "38;5;196;48;5;21;1")
+def test_rich_picker_row_cells_dim_non_focusable_rows() -> None:
+    rec = cli.SessionRecord(
+        tool="codex",
+        session_id="session-1",
+        path=None,
+        last_write=None,
+        cwd="/tmp/project",
+        metadata={"model": "gpt-5"},
+        status="active",
+    )
 
-    assert style.fg is not None
-    assert style.bg is not None
-    assert style.bold is True
+    cells = cli.rich_picker_row_cells(rec)
 
-
-def test_apply_ansi_sgr_supports_truecolor_sequences() -> None:
-    style = cli.apply_ansi_sgr(cli.AnsiStyle(), "38;2;255;255;255;48;2;42;43;60")
-
-    assert style.fg == 7
-    assert style.bg is not None
-    assert style.dim is False
-
-
-def test_parse_ansi_segments_supports_truecolor_backgrounds() -> None:
-    segments = cli.parse_ansi_segments("\x1b[48;2;42;43;60mX\x1b[0m")
-
-    assert segments == [("X", cli.AnsiStyle(bg=0))]
+    assert [cell.plain for cell in cells] == list(cli.picker_row_cells(rec))
+    assert str(cells[1].style) == "dim"

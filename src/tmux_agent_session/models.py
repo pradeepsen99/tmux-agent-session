@@ -41,12 +41,3 @@ class SessionRecord:
     score: int = 0
     status: str = "stale"
     reasons: list[str] = field(default_factory=list)
-
-
-@dataclass
-class AnsiStyle:
-    fg: int | None = None
-    bg: int | None = None
-    bold: bool = False
-    dim: bool = False
-    reverse: bool = False
