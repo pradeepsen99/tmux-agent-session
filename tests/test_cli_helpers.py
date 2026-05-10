@@ -206,6 +206,14 @@ def test_capture_tmux_pane_preview_returns_empty_on_failure_or_missing_pane(
 
     assert cli.capture_tmux_pane_preview(rec) == []
 
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("tmux missing")),
+    )
+
+    assert cli.capture_tmux_pane_preview(rec) == []
+
 
 def test_move_selection_handles_empty_unknown_and_bounds() -> None:
     selectable = [2, 4, 6]
@@ -235,7 +243,6 @@ def test_picker_row_cells_include_expected_columns() -> None:
         "codex",
         "—",
         "gpt-5",
-        "session-1",
         "project",
     )
     assert cli.PICKER_METADATA_PRIMARY[0][0] == "Model"

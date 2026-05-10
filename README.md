@@ -9,7 +9,8 @@ Inspect likely active Codex and OpenCode sessions and map them to tmux panes.
 - Detects running `codex` and `opencode` processes
 - Inspects known session storage directories for both tools
 - Correlates sessions by session id, cwd, and recency
-- Classifies sessions as `active`, `recent`, or `stale`
+- Classifies sessions as `waiting`, `active`, `recent`, or `stale`
+- Flags tmux-backed sessions that appear to require user feedback
 - Optionally opens an interactive picker and focuses the matching tmux pane
 
 This tool is intentionally heuristic. It does not depend on an official live session registry from either CLI.

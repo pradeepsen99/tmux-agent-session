@@ -103,3 +103,41 @@ def test_textual_picker_caches_tmux_preview_and_uses_responsive_layout() -> None
         assert previews == [("abc", 7)]
 
     asyncio.run(scenario())
+
+
+def test_textual_picker_expands_preview_panel_on_wide_layout() -> None:
+    async def scenario() -> None:
+        app = cli.SessionPickerApp(
+            [make_record("abc")],
+            focus_callback=lambda _rec: True,
+            preview_callback=lambda _rec, _limit: ["preview"],
+        )
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            sessions = app.query_one("#sessions")
+            sidebar = app.query_one("#sidebar")
+            assert sidebar.region.x == sessions.region.x + sessions.region.width
+            assert sidebar.region.width > sessions.region.width
+            await pilot.press("q")
+
+    asyncio.run(scenario())
+
+
+def test_textual_picker_message_calls_out_feedback_required() -> None:
+    async def scenario() -> None:
+        rec = make_record("abc")
+        rec.status = "waiting"
+        rec.requires_user_feedback = True
+        app = cli.SessionPickerApp(
+            [rec],
+            focus_callback=lambda _rec: True,
+            preview_callback=lambda _rec, _limit: ["Waiting for user input"],
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            assert app.query_one("#message").content.startswith("Feedback required.")
+            await pilot.press("q")
+
+    asyncio.run(scenario())

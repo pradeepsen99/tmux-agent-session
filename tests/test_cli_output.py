@@ -46,7 +46,8 @@ def test_print_table_outputs_headers_and_row(capsys) -> None:
 
     assert "TOOL" in out
     assert "STATUS" in out
-    assert "abc123" in out
+    assert "SESSION_ID" not in out
+    assert "abc123" not in out
     assert "work:1.2" in out
     assert "project" in out
     assert "/tmp/project" not in out
@@ -61,7 +62,24 @@ def test_print_json_outputs_process_and_tmux_blocks(capsys) -> None:
     assert payload[0]["tool"] == "codex"
     assert payload[0]["process"]["pid"] == 10
     assert payload[0]["tmux"]["target"] == "work:1.2"
+    assert payload[0]["requires_user_feedback"] is False
     assert payload[0]["reasons"] == ["session id matched process command"]
+
+
+def test_output_surfaces_feedback_required_state(capsys) -> None:
+    rec = make_record()
+    rec.status = "waiting"
+    rec.requires_user_feedback = True
+
+    cli.print_table([rec])
+    table_out = capsys.readouterr().out
+    cli.print_json([rec])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert "waiting" in table_out
+    assert "requires user" in table_out
+    assert "feedback" in table_out
+    assert payload[0]["requires_user_feedback"] is True
 
 
 def test_append_detail_wraps_multiline_values() -> None:
@@ -82,6 +100,15 @@ def test_build_picker_details_includes_core_fields() -> None:
     assert "Tmux: work:1.2 | editor | ttys001" in joined
     assert "Process: pid 10 | ttys001 | 1m 1s" in joined
     assert "Model: gpt-5" in joined
+
+
+def test_build_picker_details_includes_feedback_state() -> None:
+    rec = make_record()
+    rec.requires_user_feedback = True
+
+    lines = cli.build_picker_details(rec, 80)
+
+    assert "Feedback: requires user feedback" in "\n".join(lines)
 
 
 def test_build_picker_details_includes_pane_preview() -> None:

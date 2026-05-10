@@ -91,20 +91,23 @@ def capture_tmux_pane_preview(rec: SessionRecord, limit: int = 12) -> list[str]:
     if rec.tmux_pane is None:
         return []
 
-    result = subprocess.run(
-        [
-            "tmux",
-            "capture-pane",
-            "-p",
-            "-e",
-            "-t",
-            rec.tmux_pane.pane_id,
-            "-S",
-            f"-{max(1, limit)}",
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "tmux",
+                "capture-pane",
+                "-p",
+                "-e",
+                "-t",
+                rec.tmux_pane.pane_id,
+                "-S",
+                f"-{max(1, limit)}",
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return []
     if result.returncode != 0:
         return []
 

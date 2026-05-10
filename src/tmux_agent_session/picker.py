@@ -22,7 +22,7 @@ from .models import SessionRecord
 from .tmux import capture_tmux_pane_preview, focus_tmux_pane, tmux_target
 
 
-PICKER_COLUMNS = ("Status", "Tool", "Target", "Model", "Session", "CWD")
+PICKER_COLUMNS = ("Status", "Tool", "Target", "Model", "CWD")
 
 
 def move_selection(current: int | None, selectable: list[int], step: int) -> int | None:
@@ -43,19 +43,18 @@ def first_focusable_index(records: list[SessionRecord]) -> int | None:
     return 0 if records else None
 
 
-def picker_row_cells(rec: SessionRecord) -> tuple[str, str, str, str, str, str]:
+def picker_row_cells(rec: SessionRecord) -> tuple[str, str, str, str, str]:
     return (
         rec.status,
         rec.tool,
         tmux_target(rec),
         display_model(rec) or "—",
-        rec.session_id,
         display_cwd(rec) or "—",
     )
 
 
 def rich_picker_row_cells(rec: SessionRecord) -> list[Text]:
-    status, tool, target, model, session_id, cwd = picker_row_cells(rec)
+    status, tool, target, model, cwd = picker_row_cells(rec)
     base_style = "dim" if rec.tmux_pane is None else ""
     status_cell = status_text(status)
     if base_style:
@@ -65,7 +64,6 @@ def rich_picker_row_cells(rec: SessionRecord) -> list[Text]:
         Text(tool, style=base_style),
         Text(target, style=base_style),
         Text(model, style=base_style),
-        Text(session_id, style=base_style),
         Text(cwd, style=base_style),
     ]
 
@@ -85,6 +83,8 @@ def append_detail(lines: list[str], label: str, value: str | None, width: int) -
 
 def picker_detail_items(rec: SessionRecord) -> list[tuple[str, str]]:
     items = [("Session", rec.session_id)]
+    if rec.requires_user_feedback:
+        items.append(("Feedback", "requires user feedback"))
     cwd = display_cwd(rec)
     if cwd:
         items.append(("CWD", cwd))
@@ -156,12 +156,12 @@ class SessionPickerApp(App[int]):
     }
 
     #sessions {
-        width: 3fr;
+        width: 2fr;
         height: 100%;
     }
 
     #sidebar {
-        width: 2fr;
+        width: 3fr;
         min-width: 32;
         height: 100%;
         border-left: solid $surface;
@@ -335,6 +335,10 @@ class SessionPickerApp(App[int]):
         )
         if rec.tmux_pane is None:
             self.update_message("Selected session has no tmux target.")
+        elif rec.requires_user_feedback:
+            self.update_message(
+                "Feedback required. Enter to focus, j/k or arrows to move, q to quit."
+            )
         else:
             self.update_message("Enter to focus, j/k or arrows to move, q to quit.")
 

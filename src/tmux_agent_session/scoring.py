@@ -1,9 +1,44 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
+from collections.abc import Callable
 
 from .models import ProcessInfo, SessionRecord
 from .session_files import normalize_cwd
+
+
+ANSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+FEEDBACK_PROMPT_PATTERNS = [
+    re.compile(
+        r"\b(?:requir(?:e|es|ing|ed)|needs?)\s+(?:user\s+)?"
+        r"(?:feedback|input|response|approval|confirmation)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bwaiting\s+for\s+(?:user\s+)?"
+        r"(?:feedback|input|response|approval|confirmation)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:approval|confirmation|permission)\s+(?:required|needed)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:approve|confirm|continue|proceed)\?\s*$", re.IGNORECASE),
+    re.compile(r"\bdo you want to\b", re.IGNORECASE),
+    re.compile(r"\bpress\s+(?:enter|return|y|n|yes|no)\b", re.IGNORECASE),
+]
+
+
+def strip_ansi(text: str) -> str:
+    return ANSI_PATTERN.sub("", text)
+
+
+def pane_requires_user_feedback(lines: list[str]) -> bool:
+    text = "\n".join(strip_ansi(line).strip() for line in lines if line.strip())
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in FEEDBACK_PROMPT_PATTERNS)
 
 
 def age_minutes(ts: float | None) -> float | None:
@@ -62,6 +97,23 @@ def score_session(
         rec.status = "stale"
 
 
+def mark_feedback_required(
+    records: list[SessionRecord],
+    preview_callback: Callable[[SessionRecord, int], list[str]],
+    limit: int = 30,
+) -> None:
+    for rec in records:
+        if rec.tmux_pane is None:
+            continue
+        if not pane_requires_user_feedback(preview_callback(rec, limit)):
+            continue
+        rec.requires_user_feedback = True
+        rec.status = "waiting"
+        reason = "tmux pane appears to be waiting for user feedback"
+        if reason not in rec.reasons:
+            rec.reasons.append(reason)
+
+
 def add_process_only_records(
     records: list[SessionRecord], processes: list[ProcessInfo]
 ) -> list[SessionRecord]:
@@ -93,7 +145,7 @@ def add_process_only_records(
 
 
 def sort_records(records: list[SessionRecord]) -> list[SessionRecord]:
-    status_order = {"active": 0, "recent": 1, "stale": 2}
+    status_order = {"waiting": 0, "active": 1, "recent": 2, "stale": 3}
     return sorted(
         records,
         key=lambda r: (

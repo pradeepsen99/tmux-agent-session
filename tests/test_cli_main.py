@@ -122,6 +122,56 @@ def test_build_records_filters_process_only_records_by_tool(monkeypatch) -> None
     assert [rec.session_id for rec in records] == ["pid-1"]
 
 
+def test_build_records_marks_sessions_waiting_for_feedback(monkeypatch) -> None:
+    proc = cli.ProcessInfo(
+        pid=1,
+        ppid=0,
+        tty="ttys001",
+        etime_seconds=30,
+        cwd="/tmp/codex",
+        command="codex --session session-1",
+        tool="codex",
+        session_ids=["session-1"],
+    )
+    pane = cli.TmuxPane(
+        session_name="work",
+        window_index="1",
+        window_name="editor",
+        pane_index="0",
+        pane_id="%1",
+        pane_tty="ttys001",
+    )
+    rec = cli.SessionRecord(
+        tool="codex",
+        session_id="session-1",
+        path=None,
+        last_write=None,
+    )
+
+    monkeypatch.setattr(cli, "detect_processes", lambda: [proc])
+    monkeypatch.setattr(cli, "detect_tmux_panes", lambda: [pane])
+    monkeypatch.setattr(cli, "load_sessions", lambda _tool, _paths: [rec])
+    monkeypatch.setattr(
+        cli,
+        "capture_tmux_pane_preview",
+        lambda _rec, _limit: ["Waiting for user response"],
+    )
+
+    args = argparse.Namespace(
+        tool="codex",
+        codex_dir=cli.DEFAULT_CODEX_DIR,
+        opencode_dir=[],
+        active_minutes=10,
+        recent_hours=12,
+        include_stale=False,
+    )
+
+    records = cli.build_records(args)
+
+    assert records[0].status == "waiting"
+    assert records[0].requires_user_feedback is True
+
+
 def test_build_records_excludes_sessions_without_tmux_panes(monkeypatch) -> None:
     proc = cli.ProcessInfo(
         pid=1,

@@ -54,8 +54,11 @@ from .processes import (
 from .scoring import (
     add_process_only_records,
     age_minutes,
+    mark_feedback_required,
+    pane_requires_user_feedback,
     score_session,
     sort_records,
+    strip_ansi,
 )
 from .session_files import (
     extract_session_from_json,
@@ -100,6 +103,7 @@ def build_records(args: argparse.Namespace) -> list[SessionRecord]:
     records = add_process_only_records(records, processes)
     attach_tmux_panes(records, panes)
     records = [rec for rec in records if rec.tmux_pane is not None]
+    mark_feedback_required(records, capture_tmux_pane_preview)
     records = sort_records(records)
 
     if not args.include_stale:

@@ -40,4 +40,5 @@ class SessionRecord:
     tmux_pane: TmuxPane | None = None
     score: int = 0
     status: str = "stale"
+    requires_user_feedback: bool = False
     reasons: list[str] = field(default_factory=list)

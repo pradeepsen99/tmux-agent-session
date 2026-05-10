@@ -155,6 +155,7 @@ def display_model(rec: SessionRecord) -> str | None:
 
 
 STATUS_STYLES = {
+    "waiting": "bold red",
     "active": "bold green",
     "recent": "yellow",
     "stale": "dim cyan",
@@ -179,6 +180,8 @@ def process_summary(rec: SessionRecord) -> str:
 
 def record_details(rec: SessionRecord) -> str:
     details: list[str] = []
+    if rec.requires_user_feedback:
+        details.append("requires user feedback")
     model = display_model(rec)
     if model:
         details.append(f"model {model}")
@@ -206,7 +209,6 @@ def print_table(
     table.add_column("TOOL", no_wrap=True)
     table.add_column("STATUS", no_wrap=True)
     table.add_column("TARGET", no_wrap=True)
-    table.add_column("SESSION_ID", no_wrap=True, max_width=24, overflow="ellipsis")
     table.add_column("CWD", ratio=1, min_width=10, overflow="ellipsis")
     table.add_column("DETAILS", ratio=2, min_width=18, overflow="fold")
 
@@ -215,7 +217,6 @@ def print_table(
             rec.tool,
             status_text(rec.status),
             tmux_target(rec),
-            rec.session_id,
             display_cwd(rec) or "—",
             record_details(rec),
         )
@@ -236,6 +237,7 @@ def print_json(records: list[SessionRecord]) -> None:
                 "cwd": rec.cwd,
                 "metadata": rec.metadata,
                 "score": rec.score,
+                "requires_user_feedback": rec.requires_user_feedback,
                 "reasons": rec.reasons,
                 "tmux": None
                 if rec.tmux_pane is None

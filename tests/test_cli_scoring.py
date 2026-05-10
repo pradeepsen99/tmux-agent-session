@@ -88,6 +88,36 @@ def test_score_session_stays_stale_without_matching_signals() -> None:
     assert rec.matched_process is None
 
 
+def test_pane_requires_user_feedback_detects_prompt_text() -> None:
+    assert cli.pane_requires_user_feedback(
+        ["\x1b[31mWaiting for user input\x1b[0m", "Continue?"]
+    )
+    assert cli.pane_requires_user_feedback(["Session is requiring user feedback"])
+    assert cli.pane_requires_user_feedback(["approval required before running command"])
+    assert not cli.pane_requires_user_feedback(["tests passed", "idle"])
+
+
+def test_mark_feedback_required_updates_status_and_reason() -> None:
+    rec = make_record(minutes_ago=1)
+    rec.status = "active"
+    rec.tmux_pane = cli.TmuxPane(
+        session_name="work",
+        window_index="1",
+        window_name="editor",
+        pane_index="0",
+        pane_id="%1",
+        pane_tty="ttys001",
+    )
+
+    cli.mark_feedback_required(
+        [rec], lambda _rec, _limit: ["Agent needs user feedback"]
+    )
+
+    assert rec.status == "waiting"
+    assert rec.requires_user_feedback is True
+    assert "tmux pane appears to be waiting for user feedback" in rec.reasons
+
+
 def test_add_process_only_records_adds_only_unmatched_processes() -> None:
     matched_proc = make_process(pid=1, session_ids=["session-1"])
     unmatched_proc = make_process(pid=2, session_ids=["session-2"])
@@ -135,6 +165,10 @@ def test_attach_tmux_panes_matches_process_tty() -> None:
 
 
 def test_sort_records_orders_by_status_score_last_write_tool_and_id() -> None:
+    waiting = make_record(tool="opencode", session_id="waiting", minutes_ago=60)
+    waiting.status = "waiting"
+    waiting.score = 1
+
     stale = make_record(tool="opencode", session_id="z", minutes_ago=120)
     stale.status = "stale"
     stale.score = 1
@@ -151,6 +185,14 @@ def test_sort_records_orders_by_status_score_last_write_tool_and_id() -> None:
     active_high.status = "active"
     active_high.score = 100
 
-    sorted_records = cli.sort_records([stale, recent, active_low, active_high])
+    sorted_records = cli.sort_records(
+        [stale, recent, active_low, active_high, waiting]
+    )
 
-    assert [rec.session_id for rec in sorted_records] == ["a", "c", "b", "z"]
+    assert [rec.session_id for rec in sorted_records] == [
+        "waiting",
+        "a",
+        "c",
+        "b",
+        "z",
+    ]
