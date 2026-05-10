@@ -99,6 +99,7 @@ def build_records(args: argparse.Namespace) -> list[SessionRecord]:
 
     records = add_process_only_records(records, processes)
     attach_tmux_panes(records, panes)
+    records = [rec for rec in records if rec.tmux_pane is not None]
     records = sort_records(records)
 
     if not args.include_stale:

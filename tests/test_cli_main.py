@@ -21,12 +21,21 @@ def test_build_arg_parser_defaults() -> None:
 
 def test_build_records_filters_stale_and_honors_tool_selection(monkeypatch) -> None:
     load_calls: list[str] = []
+    pane = cli.TmuxPane(
+        session_name="work",
+        window_index="1",
+        window_name="editor",
+        pane_index="0",
+        pane_id="%1",
+        pane_tty="ttys001",
+    )
     active = cli.SessionRecord(
         tool="codex",
         session_id="active",
         path=None,
         last_write=None,
         status="active",
+        tmux_pane=pane,
     )
     stale = cli.SessionRecord(
         tool="opencode",
@@ -85,9 +94,17 @@ def test_build_records_filters_process_only_records_by_tool(monkeypatch) -> None
         command="opencode",
         tool="opencode",
     )
+    pane = cli.TmuxPane(
+        session_name="work",
+        window_index="1",
+        window_name="editor",
+        pane_index="0",
+        pane_id="%1",
+        pane_tty="ttys001",
+    )
 
     monkeypatch.setattr(cli, "detect_processes", lambda: [codex_proc, opencode_proc])
-    monkeypatch.setattr(cli, "detect_tmux_panes", lambda: [])
+    monkeypatch.setattr(cli, "detect_tmux_panes", lambda: [pane])
     monkeypatch.setattr(cli, "load_sessions", lambda _tool, _paths: [])
 
     args = argparse.Namespace(
@@ -103,6 +120,33 @@ def test_build_records_filters_process_only_records_by_tool(monkeypatch) -> None
 
     assert [rec.tool for rec in records] == ["codex"]
     assert [rec.session_id for rec in records] == ["pid-1"]
+
+
+def test_build_records_excludes_sessions_without_tmux_panes(monkeypatch) -> None:
+    proc = cli.ProcessInfo(
+        pid=1,
+        ppid=0,
+        tty="ttys999",
+        etime_seconds=30,
+        cwd="/tmp/codex",
+        command="codex",
+        tool="codex",
+    )
+
+    monkeypatch.setattr(cli, "detect_processes", lambda: [proc])
+    monkeypatch.setattr(cli, "detect_tmux_panes", lambda: [])
+    monkeypatch.setattr(cli, "load_sessions", lambda _tool, _paths: [])
+
+    args = argparse.Namespace(
+        tool="codex",
+        codex_dir=cli.DEFAULT_CODEX_DIR,
+        opencode_dir=[],
+        active_minutes=10,
+        recent_hours=12,
+        include_stale=True,
+    )
+
+    assert cli.build_records(args) == []
 
 
 def test_main_prints_table_and_reasons(monkeypatch, capsys) -> None:

@@ -135,7 +135,7 @@ def test_display_helpers_and_tmux_target_use_best_available_values() -> None:
         tmux_pane=pane,
     )
 
-    assert cli.display_cwd(rec) == "/tmp/from-process"
+    assert cli.display_cwd(rec) == "from-process"
     assert cli.display_model(rec) == "openai"
     assert cli.tmux_target(rec) == "work:1.2"
 
@@ -236,7 +236,7 @@ def test_picker_row_cells_include_expected_columns() -> None:
         "—",
         "gpt-5",
         "session-1",
-        "/tmp/project",
+        "project",
     )
     assert cli.PICKER_METADATA_PRIMARY[0][0] == "Model"
 

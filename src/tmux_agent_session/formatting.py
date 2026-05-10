@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from pathlib import Path
 from typing import Any
 
 from rich import box
@@ -139,7 +140,10 @@ def picker_metadata_items(rec: SessionRecord, limit: int = 5) -> list[tuple[str,
 
 
 def display_cwd(rec: SessionRecord) -> str | None:
-    return rec.cwd or (rec.matched_process.cwd if rec.matched_process else None)
+    cwd = rec.cwd or (rec.matched_process.cwd if rec.matched_process else None)
+    if not cwd:
+        return None
+    return Path(cwd).name or cwd
 
 
 def display_model(rec: SessionRecord) -> str | None:

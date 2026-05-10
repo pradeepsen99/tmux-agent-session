@@ -48,6 +48,8 @@ def test_print_table_outputs_headers_and_row(capsys) -> None:
     assert "STATUS" in out
     assert "abc123" in out
     assert "work:1.2" in out
+    assert "project" in out
+    assert "/tmp/project" not in out
     assert "gpt-5" in out
     assert "Investigate" in out
 
@@ -76,7 +78,7 @@ def test_build_picker_details_includes_core_fields() -> None:
 
     joined = "\n".join(lines)
     assert "Session: abc123" in joined
-    assert "CWD: /tmp/project" in joined
+    assert "CWD: project" in joined
     assert "Tmux: work:1.2 | editor | ttys001" in joined
     assert "Process: pid 10 | ttys001 | 1m 1s" in joined
     assert "Model: gpt-5" in joined
