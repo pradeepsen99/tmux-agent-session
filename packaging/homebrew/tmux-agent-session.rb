@@ -3,8 +3,8 @@ class TmuxAgentSession < Formula
 
   desc "Inspect and jump to active Codex and OpenCode tmux sessions"
   homepage "https://github.com/pradeepsen99/tmux-agent-session"
-  url "https://github.com/pradeepsen99/tmux-agent-session/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "bf58d45fe82f86c4206ead28b2d5f6abff5e5ca98c0479e02cdbb236c644aeaa"
+  url "https://github.com/pradeepsen99/tmux-agent-session/archive/refs/tags/v0.1.1.tar.gz"
+  sha256 "6f9cda356e17d5c37a348d6b10939d31666724e92df770d7285207b3b33132b0"
 
   depends_on "python@3.12"
   depends_on "tmux"
