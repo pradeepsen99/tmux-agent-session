@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 from tmux_agent_session import cli
@@ -90,6 +91,116 @@ def test_extract_session_records_supports_dict_list_and_other(tmp_path: Path) ->
     assert [rec.session_id for rec in dict_records] == ["record-one"]
     assert [rec.session_id for rec in list_records] == ["record-one", "record-two"]
     assert cli.extract_session_records("opencode", path, "skip") == []
+
+
+def test_extract_opencode_sessions_reads_sqlite_model_metadata(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "opencode.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE session (
+            id text PRIMARY KEY,
+            directory text NOT NULL,
+            title text NOT NULL,
+            time_created integer NOT NULL,
+            time_updated integer NOT NULL,
+            agent text,
+            model text
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO session (
+            id, directory, title, time_created, time_updated, agent, model
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "ses_123456",
+            str(tmp_path),
+            "Investigate bug",
+            1_700_000_000_000,
+            1_700_000_123_000,
+            "build",
+            json.dumps(
+                {"id": "gpt-5.5-fast", "providerID": "openai", "variant": "xhigh"}
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    records = cli.extract_opencode_sessions(path)
+
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.session_id == "ses_123456"
+    assert rec.cwd == str(tmp_path.resolve())
+    assert rec.last_write == 1_700_000_123
+    assert rec.metadata["title"] == "Investigate bug"
+    assert rec.metadata["agent"] == "build"
+    assert rec.metadata["model"] == "gpt-5.5-fast"
+    assert rec.metadata["model_provider"] == "openai"
+    assert rec.metadata["model_variant"] == "xhigh"
+
+
+def test_extract_opencode_sessions_falls_back_to_message_model_metadata(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "opencode.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE session (
+            id text PRIMARY KEY,
+            directory text NOT NULL,
+            time_updated integer NOT NULL,
+            model text
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE message (
+            id text PRIMARY KEY,
+            session_id text NOT NULL,
+            time_created integer NOT NULL,
+            data text NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO session VALUES (?, ?, ?, ?)",
+        ("ses_abcdef", str(tmp_path), 1_700_000_123_000, None),
+    )
+    conn.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?)",
+        (
+            "msg_older",
+            "ses_abcdef",
+            1,
+            json.dumps({"modelID": "gpt-old", "providerID": "openai"}),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?)",
+        (
+            "msg_newer",
+            "ses_abcdef",
+            2,
+            json.dumps({"modelID": "gpt-5.4", "providerID": "openai"}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    records = cli.extract_opencode_sessions(path)
+
+    assert len(records) == 1
+    assert records[0].metadata["model"] == "gpt-5.4"
+    assert records[0].metadata["model_provider"] == "openai"
 
 
 def test_extract_codex_session_reads_metadata_and_turn_context(tmp_path: Path) -> None:

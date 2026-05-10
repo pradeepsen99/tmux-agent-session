@@ -20,7 +20,7 @@ Keep new modules at the repository root unless the codebase grows enough to just
 If you add tooling such as `ruff` or `pytest`, wire it through `uv run ...` and document the exact command here.
 
 ## Coding Style & Naming Conventions
-Target Python `>=3.9` as declared in [`pyproject.toml`](/Users/deepman/Desktop/AI/tmux-agent-session/pyproject.toml). Follow existing style in [`session_inspector.py`](/Users/deepman/Desktop/AI/tmux-agent-session/session_inspector.py): 4-space indentation, type hints on public functions and dataclasses, and clear snake_case names for functions and variables. Use PascalCase for dataclasses and other class names.
+Target Python `>=3.9` as declared in [`pyproject.toml`](). Follow existing style in [`session_inspector.py`](): 4-space indentation, type hints on public functions and dataclasses, and clear snake_case names for functions and variables. Use PascalCase for dataclasses and other class names.
 
 Prefer small helper functions over deeply nested logic. Keep CLI-facing behavior explicit and avoid hidden side effects.
 

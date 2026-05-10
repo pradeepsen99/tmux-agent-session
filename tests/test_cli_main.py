@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 
 import pytest
 
@@ -120,6 +121,61 @@ def test_build_records_filters_process_only_records_by_tool(monkeypatch) -> None
 
     assert [rec.tool for rec in records] == ["codex"]
     assert [rec.session_id for rec in records] == ["pid-1"]
+
+
+def test_build_records_keeps_one_opencode_session_per_tmux_pane(monkeypatch) -> None:
+    now = dt.datetime.now().timestamp()
+    cwd = cli.normalize_cwd("/tmp/repo")
+    proc = cli.ProcessInfo(
+        pid=1,
+        ppid=0,
+        tty="ttys001",
+        etime_seconds=30,
+        cwd="/tmp/repo",
+        command="opencode",
+        tool="opencode",
+    )
+    pane = cli.TmuxPane(
+        session_name="work",
+        window_index="1",
+        window_name="editor",
+        pane_index="0",
+        pane_id="%1",
+        pane_tty="ttys001",
+    )
+    older = cli.SessionRecord(
+        tool="opencode",
+        session_id="older",
+        path=None,
+        last_write=now - 1_800,
+        cwd=cwd,
+    )
+    newer = cli.SessionRecord(
+        tool="opencode",
+        session_id="newer",
+        path=None,
+        last_write=now - 60,
+        cwd=cwd,
+    )
+
+    monkeypatch.setattr(cli, "detect_processes", lambda: [proc])
+    monkeypatch.setattr(cli, "detect_tmux_panes", lambda: [pane])
+    monkeypatch.setattr(cli, "load_sessions", lambda _tool, _paths: [older, newer])
+    monkeypatch.setattr(cli, "capture_tmux_pane_preview", lambda _rec, _limit: [])
+
+    args = argparse.Namespace(
+        tool="opencode",
+        codex_dir=cli.DEFAULT_CODEX_DIR,
+        opencode_dir=[],
+        active_minutes=10,
+        recent_hours=12,
+        include_stale=False,
+    )
+
+    records = cli.build_records(args)
+
+    assert [rec.session_id for rec in records] == ["newer"]
+    assert records[0].tmux_pane == pane
 
 
 def test_build_records_marks_sessions_waiting_for_feedback(monkeypatch) -> None:

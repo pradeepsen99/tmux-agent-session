@@ -73,6 +73,7 @@ from .session_files import (
 from .tmux import (
     attach_tmux_panes,
     capture_tmux_pane_preview,
+    deduplicate_tmux_pane_records,
     detect_tmux_panes,
     focus_tmux_pane,
     tmux_target,
@@ -103,6 +104,7 @@ def build_records(args: argparse.Namespace) -> list[SessionRecord]:
     records = add_process_only_records(records, processes)
     attach_tmux_panes(records, panes)
     records = [rec for rec in records if rec.tmux_pane is not None]
+    records = deduplicate_tmux_pane_records(records, "opencode")
     mark_feedback_required(records, capture_tmux_pane_preview)
     records = sort_records(records)
 

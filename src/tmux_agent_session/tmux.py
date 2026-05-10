@@ -57,6 +57,32 @@ def attach_tmux_panes(records: list[SessionRecord], panes: list[TmuxPane]) -> No
         rec.tmux_pane = panes_by_tty.get(normalize_tty(rec.matched_process.tty))
 
 
+def deduplicate_tmux_pane_records(
+    records: list[SessionRecord], tool: str
+) -> list[SessionRecord]:
+    best_by_pane: dict[str, tuple[int, SessionRecord]] = {}
+
+    for index, rec in enumerate(records):
+        if rec.tool != tool or rec.tmux_pane is None:
+            continue
+        current = best_by_pane.get(rec.tmux_pane.pane_id)
+        if current is None or _tmux_pane_record_rank(rec, index) > _tmux_pane_record_rank(
+            current[1], current[0]
+        ):
+            best_by_pane[rec.tmux_pane.pane_id] = (index, rec)
+
+    kept = {id(rec) for _, rec in best_by_pane.values()}
+    return [
+        rec
+        for rec in records
+        if rec.tool != tool or rec.tmux_pane is None or id(rec) in kept
+    ]
+
+
+def _tmux_pane_record_rank(rec: SessionRecord, index: int) -> tuple[int, float, int]:
+    return (rec.score, rec.last_write or 0.0, -index)
+
+
 def tmux_target(rec: SessionRecord) -> str:
     if rec.tmux_pane is None:
         return "—"
