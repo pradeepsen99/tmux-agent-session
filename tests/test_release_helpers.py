@@ -46,3 +46,16 @@ def test_render_homebrew_formula_includes_release_metadata() -> None:
         'url "https://github.com/owner/repo/archive/refs/tags/v1.2.3.tar.gz"' in formula
     )
     assert 'sha256 "abc123"' in formula
+
+
+def test_render_homebrew_formula_includes_python_resources() -> None:
+    formula = release.render_homebrew_formula(
+        repository="owner/repo",
+        tag="v1.2.3",
+        sha256="abc123",
+    )
+
+    for name, url, sha256 in release.HOMEBREW_PYTHON_RESOURCES:
+        assert f'resource "{name}" do' in formula
+        assert f'url "{url}"' in formula
+        assert f'sha256 "{sha256}"' in formula

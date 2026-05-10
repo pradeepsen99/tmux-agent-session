@@ -291,6 +291,7 @@ wheels = [
 name = "tmux-agent-session"
 source = { editable = "." }
 dependencies = [
+    { name = "rich" },
     { name = "textual" },
 ]
 
@@ -301,7 +302,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "textual", specifier = ">=8.2.5,<9" }]
+requires-dist = [
+    { name = "rich", specifier = ">=15.0.0,<16" },
+    { name = "textual", specifier = ">=8.2.5,<9" },
+]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8.0" }]

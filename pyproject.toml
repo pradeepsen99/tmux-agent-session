@@ -5,6 +5,7 @@ description = "Inspect and jump to active Codex and OpenCode tmux sessions"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
+    "rich>=15.0.0,<16",
     "textual>=8.2.5,<9",
 ]
 
