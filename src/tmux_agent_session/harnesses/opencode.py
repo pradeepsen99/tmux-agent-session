@@ -6,14 +6,15 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from ..models import SessionRecord
+from ..models import SessionCandidates, SessionRecord
 from ..session_files import (
-    extract_session_records,
+    extract_matching_session_records,
     fallback_file_record,
     find_session_files,
     normalize_cwd,
     read_json_file,
     safe_mtime,
+    session_matches_candidates,
 )
 
 
@@ -97,9 +98,13 @@ def opencode_message_model_metadata(raw: Any) -> dict[str, Any]:
 
 
 def load_opencode_message_models(
-    conn: sqlite3.Connection, tables: set[str]
+    conn: sqlite3.Connection,
+    tables: set[str],
+    session_ids: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     if "message" not in tables:
+        return {}
+    if session_ids is not None and not session_ids:
         return {}
     try:
         columns = {
@@ -107,8 +112,14 @@ def load_opencode_message_models(
         }
         if not {"session_id", "data"}.issubset(columns):
             return {}
+        where = ""
+        params: tuple[str, ...] = ()
+        if session_ids is not None:
+            placeholders = ", ".join("?" for _ in session_ids)
+            where = f" WHERE session_id IN ({placeholders})"
+            params = tuple(session_ids)
         order = " ORDER BY time_created DESC" if "time_created" in columns else ""
-        rows = conn.execute(f"SELECT session_id, data FROM message{order}")
+        rows = conn.execute(f"SELECT session_id, data FROM message{where}{order}", params)
     except sqlite3.Error:
         return {}
 
@@ -123,12 +134,37 @@ def load_opencode_message_models(
     return message_models
 
 
-def extract_opencode_db_sessions(path: Path) -> list[SessionRecord]:
+def _opencode_row_matches_candidates(
+    row: sqlite3.Row, candidates: SessionCandidates | None
+) -> bool:
+    if candidates is None:
+        return True
+    if candidates.is_empty:
+        return False
+
+    row_keys = set(row.keys())
+    session_id = row["id"] if "id" in row_keys else None
+    if isinstance(session_id, str) and session_id.strip() in candidates.session_ids:
+        return True
+
+    for key in ("directory", "path"):
+        if key not in row_keys:
+            continue
+        value = row[key]
+        if isinstance(value, str) and normalize_cwd(value.strip()) in candidates.cwds:
+            return True
+    return False
+
+
+def extract_opencode_db_sessions(
+    path: Path, candidates: SessionCandidates | None = None
+) -> list[SessionRecord]:
     try:
         conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
     except (OSError, sqlite3.Error):
-        return [fallback_file_record("opencode", path)]
+        fallback = fallback_file_record("opencode", path)
+        return [fallback] if session_matches_candidates(fallback, candidates) else []
 
     try:
         tables = {
@@ -160,9 +196,19 @@ def extract_opencode_db_sessions(path: Path) -> list[SessionRecord]:
             return []
 
         rows = conn.execute(f"SELECT {', '.join(selected)} FROM session").fetchall()
-        message_models = load_opencode_message_models(conn, tables)
+        rows = [row for row in rows if _opencode_row_matches_candidates(row, candidates)]
+        missing_model_session_ids = {
+            row["id"].strip()
+            for row in rows
+            if isinstance(row["id"], str)
+            and ("model" not in set(row.keys()) or not opencode_model_metadata(row["model"]))
+        }
+        message_models = load_opencode_message_models(
+            conn, tables, missing_model_session_ids
+        )
     except sqlite3.Error:
-        return [fallback_file_record("opencode", path)]
+        fallback = fallback_file_record("opencode", path)
+        return [fallback] if session_matches_candidates(fallback, candidates) else []
     finally:
         conn.close()
 
@@ -213,17 +259,25 @@ def extract_opencode_db_sessions(path: Path) -> list[SessionRecord]:
     return records
 
 
-def extract_opencode_sessions(path: Path) -> list[SessionRecord]:
+def extract_opencode_sessions(
+    path: Path, candidates: SessionCandidates | None = None
+) -> list[SessionRecord]:
     if path.suffix == ".db":
-        return extract_opencode_db_sessions(path)
+        return extract_opencode_db_sessions(path, candidates)
 
     data = read_json_file(path)
     if data is None:
-        return [fallback_file_record("opencode", path)]
-    return extract_session_records("opencode", path, data)
+        fallback = fallback_file_record("opencode", path)
+        return [fallback] if session_matches_candidates(fallback, candidates) else []
+    return extract_matching_session_records("opencode", path, data, candidates)
 
 
-def load_sessions(base_paths: list[Path]) -> list[SessionRecord]:
+def load_sessions(
+    base_paths: list[Path], candidates: SessionCandidates | None = None
+) -> list[SessionRecord]:
+    if candidates is not None and candidates.is_empty:
+        return []
+
     records: list[SessionRecord] = []
     seen: set[tuple[str, str]] = set()
 
@@ -232,10 +286,10 @@ def load_sessions(base_paths: list[Path]) -> list[SessionRecord]:
             continue
         paths = [base] if base.is_file() else find_session_files(base)
         for path in paths:
-            candidates = extract_opencode_sessions(path)
-            if not candidates:
+            record_candidates = extract_opencode_sessions(path, candidates)
+            if not record_candidates:
                 continue
-            for rec in candidates:
+            for rec in record_candidates:
                 key = (rec.tool, rec.session_id)
                 if key in seen:
                     continue

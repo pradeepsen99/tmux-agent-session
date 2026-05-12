@@ -49,7 +49,7 @@ def test_build_records_filters_stale_and_honors_tool_selection(monkeypatch) -> N
     monkeypatch.setattr(cli, "detect_processes", lambda: [])
     monkeypatch.setattr(cli, "detect_tmux_panes", lambda: [])
 
-    def fake_load_sessions(tool: str, _paths):
+    def fake_load_sessions(tool: str, _paths, _candidates=None):
         load_calls.append(tool)
         return [active] if tool == "codex" else [stale]
 
@@ -72,7 +72,7 @@ def test_build_records_filters_stale_and_honors_tool_selection(monkeypatch) -> N
 
     records = cli.build_records(args)
 
-    assert load_calls == ["codex", "opencode"]
+    assert set(load_calls) == {"codex", "opencode"}
     assert [rec.session_id for rec in records] == ["active"]
 
 
@@ -106,7 +106,7 @@ def test_build_records_filters_process_only_records_by_tool(monkeypatch) -> None
 
     monkeypatch.setattr(cli, "detect_processes", lambda: [codex_proc, opencode_proc])
     monkeypatch.setattr(cli, "detect_tmux_panes", lambda: [pane])
-    monkeypatch.setattr(cli, "load_sessions", lambda _tool, _paths: [])
+    monkeypatch.setattr(cli, "load_sessions", lambda _tool, _paths, _candidates=None: [])
 
     args = argparse.Namespace(
         tool="codex",
@@ -160,7 +160,9 @@ def test_build_records_keeps_one_opencode_session_per_tmux_pane(monkeypatch) -> 
 
     monkeypatch.setattr(cli, "detect_processes", lambda: [proc])
     monkeypatch.setattr(cli, "detect_tmux_panes", lambda: [pane])
-    monkeypatch.setattr(cli, "load_sessions", lambda _tool, _paths: [older, newer])
+    monkeypatch.setattr(
+        cli, "load_sessions", lambda _tool, _paths, _candidates=None: [older, newer]
+    )
     monkeypatch.setattr(cli, "capture_tmux_pane_preview", lambda _rec, _limit: [])
 
     args = argparse.Namespace(
@@ -206,7 +208,7 @@ def test_build_records_marks_sessions_waiting_for_feedback(monkeypatch) -> None:
 
     monkeypatch.setattr(cli, "detect_processes", lambda: [proc])
     monkeypatch.setattr(cli, "detect_tmux_panes", lambda: [pane])
-    monkeypatch.setattr(cli, "load_sessions", lambda _tool, _paths: [rec])
+    monkeypatch.setattr(cli, "load_sessions", lambda _tool, _paths, _candidates=None: [rec])
     monkeypatch.setattr(
         cli,
         "capture_tmux_pane_preview",
@@ -241,7 +243,7 @@ def test_build_records_excludes_sessions_without_tmux_panes(monkeypatch) -> None
 
     monkeypatch.setattr(cli, "detect_processes", lambda: [proc])
     monkeypatch.setattr(cli, "detect_tmux_panes", lambda: [])
-    monkeypatch.setattr(cli, "load_sessions", lambda _tool, _paths: [])
+    monkeypatch.setattr(cli, "load_sessions", lambda _tool, _paths, _candidates=None: [])
 
     args = argparse.Namespace(
         tool="codex",

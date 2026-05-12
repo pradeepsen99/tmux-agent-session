@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
-from .models import SessionRecord
+from .models import SessionCandidates, SessionRecord
 
 
 def safe_mtime(path: Path) -> float | None:
@@ -99,9 +99,30 @@ def extract_session_from_json(
 
 
 def extract_session_records(tool: str, path: Path, data: Any) -> list[SessionRecord]:
+    return extract_matching_session_records(tool, path, data, None)
+
+
+def session_matches_candidates(
+    rec: SessionRecord, candidates: SessionCandidates | None
+) -> bool:
+    if candidates is None:
+        return True
+    if candidates.is_empty:
+        return False
+    if rec.session_id in candidates.session_ids:
+        return True
+    return rec.cwd is not None and rec.cwd in candidates.cwds
+
+
+def extract_matching_session_records(
+    tool: str,
+    path: Path,
+    data: Any,
+    candidates: SessionCandidates | None,
+) -> list[SessionRecord]:
     if isinstance(data, dict):
         rec = extract_session_from_json(tool, path, data)
-        return [rec] if rec is not None else []
+        return [rec] if rec is not None and session_matches_candidates(rec, candidates) else []
 
     if isinstance(data, list):
         records: list[SessionRecord] = []
@@ -109,7 +130,7 @@ def extract_session_records(tool: str, path: Path, data: Any) -> list[SessionRec
             if not isinstance(item, dict):
                 continue
             rec = extract_session_from_json(tool, path, item)
-            if rec is not None:
+            if rec is not None and session_matches_candidates(rec, candidates):
                 records.append(rec)
         return records
 

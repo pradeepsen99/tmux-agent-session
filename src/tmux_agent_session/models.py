@@ -42,3 +42,13 @@ class SessionRecord:
     status: str = "stale"
     requires_user_feedback: bool = False
     reasons: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SessionCandidates:
+    session_ids: frozenset[str] = field(default_factory=frozenset)
+    cwds: frozenset[str] = field(default_factory=frozenset)
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.session_ids and not self.cwds

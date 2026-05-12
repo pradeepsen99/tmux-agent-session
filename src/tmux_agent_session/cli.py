@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import __version__
@@ -30,7 +31,7 @@ from .formatting import (
 from .harnesses import load_sessions as _load_harness_sessions
 from .harnesses.codex import DEFAULT_CODEX_DIR, extract_codex_session
 from .harnesses.opencode import DEFAULT_OPENCODE_DIRS, extract_opencode_sessions
-from .models import ProcessInfo, SessionRecord, TmuxPane
+from .models import ProcessInfo, SessionCandidates, SessionRecord, TmuxPane
 from .picker import (
     SessionPickerApp,
     append_detail,
@@ -80,23 +81,97 @@ from .tmux import (
 )
 
 
-def load_sessions(tool: str, base_paths: list[Path]) -> list[SessionRecord]:
-    return _load_harness_sessions(tool, base_paths)
+def load_sessions(
+    tool: str,
+    base_paths: list[Path],
+    candidates: SessionCandidates | None = None,
+) -> list[SessionRecord]:
+    return _load_harness_sessions(tool, base_paths, candidates)
+
+
+def tmux_attached_processes(
+    processes: list[ProcessInfo], panes: list[TmuxPane]
+) -> list[ProcessInfo]:
+    pane_ttys = {pane.pane_tty for pane in panes if pane.pane_tty is not None}
+    return [
+        proc
+        for proc in processes
+        if proc.tty is not None and normalize_tty(proc.tty) in pane_ttys
+    ]
+
+
+def build_session_candidates(
+    processes: list[ProcessInfo],
+) -> dict[str, SessionCandidates]:
+    ids_by_tool: dict[str, set[str]] = {}
+    cwds_by_tool: dict[str, set[str]] = {}
+
+    for proc in processes:
+        ids = ids_by_tool.setdefault(proc.tool, set())
+        ids.update(session_id for session_id in proc.session_ids if session_id)
+
+        cwd = normalize_cwd(proc.cwd)
+        if cwd is not None:
+            cwds_by_tool.setdefault(proc.tool, set()).add(cwd)
+
+    tools = set(ids_by_tool) | set(cwds_by_tool)
+    return {
+        tool: SessionCandidates(
+            session_ids=frozenset(ids_by_tool.get(tool, set())),
+            cwds=frozenset(cwds_by_tool.get(tool, set())),
+        )
+        for tool in tools
+    }
+
+
+def session_candidates_for_tool(
+    candidates_by_tool: dict[str, SessionCandidates], tool: str
+) -> SessionCandidates:
+    return candidates_by_tool.get(tool, SessionCandidates())
 
 
 def build_records(args: argparse.Namespace) -> list[SessionRecord]:
     opencode_dirs = args.opencode_dir or DEFAULT_OPENCODE_DIRS
 
-    processes = detect_processes()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        processes_future = executor.submit(detect_processes)
+        panes_future = executor.submit(detect_tmux_panes)
+        processes = processes_future.result()
+        panes = panes_future.result()
+
     if args.tool != "all":
         processes = [proc for proc in processes if proc.tool == args.tool]
-    panes = detect_tmux_panes()
+
+    candidates_by_tool = build_session_candidates(
+        tmux_attached_processes(processes, panes)
+    )
     records: list[SessionRecord] = []
 
+    load_tasks: list[tuple[str, list[Path], SessionCandidates]] = []
     if args.tool in ("all", "codex"):
-        records.extend(load_sessions("codex", [args.codex_dir]))
+        load_tasks.append(
+            ("codex", [args.codex_dir], session_candidates_for_tool(candidates_by_tool, "codex"))
+        )
     if args.tool in ("all", "opencode"):
-        records.extend(load_sessions("opencode", opencode_dirs))
+        load_tasks.append(
+            (
+                "opencode",
+                opencode_dirs,
+                session_candidates_for_tool(candidates_by_tool, "opencode"),
+            )
+        )
+
+    if len(load_tasks) == 1:
+        tool, paths, candidates = load_tasks[0]
+        records.extend(load_sessions(tool, paths, candidates))
+    elif load_tasks:
+        with ThreadPoolExecutor(max_workers=len(load_tasks)) as executor:
+            futures = [
+                executor.submit(load_sessions, tool, paths, candidates)
+                for tool, paths, candidates in load_tasks
+            ]
+            for future in futures:
+                records.extend(future.result())
 
     for rec in records:
         score_session(rec, processes, args.active_minutes, args.recent_hours)
