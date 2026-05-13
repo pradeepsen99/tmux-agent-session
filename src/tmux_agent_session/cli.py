@@ -32,18 +32,6 @@ from .harnesses import load_sessions as _load_harness_sessions
 from .harnesses.codex import DEFAULT_CODEX_DIR, extract_codex_session
 from .harnesses.opencode import DEFAULT_OPENCODE_DIRS, extract_opencode_sessions
 from .models import ProcessInfo, SessionCandidates, SessionRecord, TmuxPane
-from .picker import (
-    SessionPickerApp,
-    append_detail,
-    build_picker_details,
-    first_focusable_index,
-    move_selection,
-    picker_detail_items,
-    picker_details_renderable,
-    picker_row_cells,
-    rich_picker_row_cells,
-    run_picker,
-)
 from .processes import (
     SESSION_ID_PATTERNS,
     detect_processes,
@@ -51,6 +39,7 @@ from .processes import (
     get_cwd,
     normalize_tty,
     parse_etime_to_seconds,
+    resolve_process_cwds,
 )
 from .scoring import (
     add_process_only_records,
@@ -79,6 +68,68 @@ from .tmux import (
     focus_tmux_pane,
     tmux_target,
 )
+
+
+_PICKER_EXPORTS = {
+    "SessionPickerApp",
+    "append_detail",
+    "build_picker_details",
+    "first_focusable_index",
+    "move_selection",
+    "picker_detail_items",
+    "picker_details_renderable",
+    "picker_row_cells",
+    "rich_picker_row_cells",
+    "run_picker",
+}
+
+
+def _picker_attr(name: str):
+    from . import picker
+
+    return getattr(picker, name)
+
+
+def __getattr__(name: str):
+    if name in _PICKER_EXPORTS:
+        return _picker_attr(name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def append_detail(*args, **kwargs):
+    return _picker_attr("append_detail")(*args, **kwargs)
+
+
+def build_picker_details(*args, **kwargs):
+    return _picker_attr("build_picker_details")(*args, **kwargs)
+
+
+def first_focusable_index(*args, **kwargs):
+    return _picker_attr("first_focusable_index")(*args, **kwargs)
+
+
+def move_selection(*args, **kwargs):
+    return _picker_attr("move_selection")(*args, **kwargs)
+
+
+def picker_detail_items(*args, **kwargs):
+    return _picker_attr("picker_detail_items")(*args, **kwargs)
+
+
+def picker_details_renderable(*args, **kwargs):
+    return _picker_attr("picker_details_renderable")(*args, **kwargs)
+
+
+def picker_row_cells(*args, **kwargs):
+    return _picker_attr("picker_row_cells")(*args, **kwargs)
+
+
+def rich_picker_row_cells(*args, **kwargs):
+    return _picker_attr("rich_picker_row_cells")(*args, **kwargs)
+
+
+def run_picker(records: list[SessionRecord]) -> int:
+    return _picker_attr("run_picker")(records)
 
 
 def load_sessions(
@@ -142,9 +193,9 @@ def build_records(args: argparse.Namespace) -> list[SessionRecord]:
     if args.tool != "all":
         processes = [proc for proc in processes if proc.tool == args.tool]
 
-    candidates_by_tool = build_session_candidates(
-        tmux_attached_processes(processes, panes)
-    )
+    attached_processes = tmux_attached_processes(processes, panes)
+    resolve_process_cwds(attached_processes)
+    candidates_by_tool = build_session_candidates(attached_processes)
     records: list[SessionRecord] = []
 
     load_tasks: list[tuple[str, list[Path], SessionCandidates]] = []

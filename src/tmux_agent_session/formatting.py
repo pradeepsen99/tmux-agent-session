@@ -5,11 +5,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from rich import box
-from rich.console import Console
-from rich.table import Table
-from rich.text import Text
-
 from .models import SessionRecord
 from .tmux import tmux_target
 
@@ -162,7 +157,9 @@ STATUS_STYLES = {
 }
 
 
-def status_text(status: str) -> Text:
+def status_text(status: str):
+    from rich.text import Text
+
     return Text(status, style=STATUS_STYLES.get(status, ""))
 
 
@@ -197,9 +194,11 @@ def record_details(rec: SessionRecord) -> str:
     return " | ".join(details) if details else "—"
 
 
-def print_table(
-    records: list[SessionRecord], console: Console | None = None
-) -> None:
+def print_table(records: list[SessionRecord], console: Any | None = None) -> None:
+    from rich import box
+    from rich.console import Console
+    from rich.table import Table
+
     table = Table(
         box=box.ASCII,
         expand=True,

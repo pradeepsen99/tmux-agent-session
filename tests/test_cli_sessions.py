@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from tmux_agent_session import cli
+from tmux_agent_session.harnesses import opencode
 
 
 def test_read_json_file_handles_valid_invalid_and_missing(tmp_path: Path) -> None:
@@ -201,6 +202,76 @@ def test_extract_opencode_sessions_falls_back_to_message_model_metadata(
     assert len(records) == 1
     assert records[0].metadata["model"] == "gpt-5.4"
     assert records[0].metadata["model_provider"] == "openai"
+
+
+def test_extract_opencode_sessions_limits_candidate_cwd_history(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "opencode.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE session (
+            id text PRIMARY KEY,
+            directory text NOT NULL,
+            time_updated integer NOT NULL,
+            model text
+        )
+        """
+    )
+    for index in range(5):
+        conn.execute(
+            "INSERT INTO session VALUES (?, ?, ?, ?)",
+            (
+                f"ses_{index}",
+                str(tmp_path),
+                1_700_000_000_000 + index,
+                json.dumps({"id": f"gpt-{index}"}),
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+    candidates = cli.SessionCandidates(cwds=frozenset({str(tmp_path.resolve())}))
+
+    records = cli.extract_opencode_sessions(path, candidates)
+
+    assert [rec.session_id for rec in records] == ["ses_4", "ses_3", "ses_2"]
+
+
+def test_opencode_load_sessions_skips_storage_when_db_satisfies_candidates(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "opencode.db"
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE session (
+            id text PRIMARY KEY,
+            directory text NOT NULL,
+            time_updated integer NOT NULL,
+            model text
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO session VALUES (?, ?, ?, ?)",
+        ("ses_abcdef", str(tmp_path), 1_700_000_123_000, json.dumps({"id": "gpt-5"})),
+    )
+    conn.commit()
+    conn.close()
+
+    def fail_find_session_files(_base: Path):
+        raise AssertionError("storage should not be scanned after DB match")
+
+    monkeypatch.setattr(opencode, "find_session_files", fail_find_session_files)
+    candidates = cli.SessionCandidates(cwds=frozenset({str(tmp_path.resolve())}))
+
+    records = opencode.load_sessions([db_path, storage], candidates)
+
+    assert [rec.session_id for rec in records] == ["ses_abcdef"]
 
 
 def test_extract_codex_session_reads_metadata_and_turn_context(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 
 from tmux_agent_session import cli
+from tmux_agent_session import processes
 
 
 def test_parse_etime_to_seconds_supports_common_formats() -> None:
@@ -31,6 +32,40 @@ def test_extract_session_ids_dedupes_and_finds_flags_and_hex_ids() -> None:
         "abc123",
         "0123456789abcdef0123456789abcdef",
     ]
+
+
+def test_get_cwds_batches_lsof_lookup(monkeypatch) -> None:
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(processes, "_get_proc_cwd", lambda _pid: None)
+
+    def fake_run_command(cmd: list[str]) -> str:
+        commands.append(cmd)
+        return "p123\nfcwd\nn/tmp/one\np456\nfcwd\nn/tmp/two\n"
+
+    monkeypatch.setattr(processes, "run_command", fake_run_command)
+
+    assert processes.get_cwds([123, 456, 123]) == {
+        123: "/tmp/one",
+        456: "/tmp/two",
+    }
+    assert commands == [["lsof", "-a", "-p", "123,456", "-d", "cwd", "-Fn"]]
+
+
+def test_detect_processes_defers_cwd_lookup_by_default(monkeypatch) -> None:
+    ps_output = " 123 1 ?? 01:02 codex --session abc123\n"
+    monkeypatch.setattr(processes, "run_command", lambda _cmd: ps_output)
+    monkeypatch.setattr(
+        processes,
+        "get_cwd",
+        lambda _pid: (_ for _ in ()).throw(AssertionError("cwd should be deferred")),
+    )
+
+    procs = processes.detect_processes()
+
+    assert len(procs) == 1
+    assert procs[0].cwd is None
+    assert procs[0].tty is None
 
 
 def test_normalize_cwd_expands_home_and_resolves_path(tmp_path: Path) -> None:

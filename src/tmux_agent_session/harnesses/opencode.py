@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -31,11 +32,18 @@ DEFAULT_OPENCODE_DIRS = [
     _user_path("%APPDATA%/opencode/storage"),
 ]
 
+DB_CANDIDATE_ROWS_PER_CWD = 3
+
 
 def db_timestamp(value: Any) -> float | None:
     if not isinstance(value, (int, float)):
         return None
     return value / 1000 if value > 10_000_000_000 else float(value)
+
+
+@lru_cache(maxsize=4096)
+def _normalize_cwd_cached(value: str) -> str | None:
+    return normalize_cwd(value)
 
 
 def opencode_model_metadata(raw: Any) -> dict[str, Any]:
@@ -142,18 +150,79 @@ def _opencode_row_matches_candidates(
     if candidates.is_empty:
         return False
 
-    row_keys = set(row.keys())
-    session_id = row["id"] if "id" in row_keys else None
+    session_id = _row_session_id(row)
     if isinstance(session_id, str) and session_id.strip() in candidates.session_ids:
         return True
 
+    cwd = _row_normalized_cwd(row)
+    return cwd is not None and cwd in candidates.cwds
+
+
+def _row_session_id(row: sqlite3.Row) -> str | None:
+    if "id" not in row.keys():
+        return None
+    value = row["id"]
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _row_normalized_cwd(row: sqlite3.Row) -> str | None:
+    row_keys = set(row.keys())
     for key in ("directory", "path"):
         if key not in row_keys:
             continue
         value = row[key]
-        if isinstance(value, str) and normalize_cwd(value.strip()) in candidates.cwds:
-            return True
-    return False
+        if isinstance(value, str) and value.strip():
+            return _normalize_cwd_cached(value.strip())
+    return None
+
+
+def _row_updated_ts(row: sqlite3.Row) -> float:
+    row_keys = set(row.keys())
+    updated = db_timestamp(row["time_updated"]) if "time_updated" in row_keys else None
+    created = db_timestamp(row["time_created"]) if "time_created" in row_keys else None
+    return updated or created or 0.0
+
+
+def _limit_candidate_rows(
+    rows: list[sqlite3.Row],
+    candidates: SessionCandidates | None,
+) -> list[sqlite3.Row]:
+    if candidates is None or candidates.is_empty:
+        return rows
+
+    selected: list[sqlite3.Row] = []
+    selected_ids: set[int] = set()
+
+    def append_once(row: sqlite3.Row) -> None:
+        marker = id(row)
+        if marker in selected_ids:
+            return
+        selected_ids.add(marker)
+        selected.append(row)
+
+    for row in rows:
+        session_id = _row_session_id(row)
+        if session_id is not None and session_id in candidates.session_ids:
+            append_once(row)
+
+    for cwd in candidates.cwds:
+        matches = [row for row in rows if _row_normalized_cwd(row) == cwd]
+        matches.sort(key=_row_updated_ts, reverse=True)
+        for row in matches[:DB_CANDIDATE_ROWS_PER_CWD]:
+            append_once(row)
+
+    return selected
+
+
+def _records_satisfy_candidates(
+    records: list[SessionRecord], candidates: SessionCandidates | None
+) -> bool:
+    if candidates is None or candidates.is_empty:
+        return False
+
+    session_ids = {rec.session_id for rec in records if rec.session_id}
+    cwds = {rec.cwd for rec in records if rec.cwd is not None}
+    return candidates.session_ids.issubset(session_ids) and candidates.cwds.issubset(cwds)
 
 
 def extract_opencode_db_sessions(
@@ -197,6 +266,7 @@ def extract_opencode_db_sessions(
 
         rows = conn.execute(f"SELECT {', '.join(selected)} FROM session").fetchall()
         rows = [row for row in rows if _opencode_row_matches_candidates(row, candidates)]
+        rows = _limit_candidate_rows(rows, candidates)
         missing_model_session_ids = {
             row["id"].strip()
             for row in rows
@@ -215,18 +285,11 @@ def extract_opencode_db_sessions(
     records: list[SessionRecord] = []
     for row in rows:
         row_keys = set(row.keys())
-        session_id = row["id"]
-        if not isinstance(session_id, str) or not session_id.strip():
+        session_id = _row_session_id(row)
+        if session_id is None:
             continue
 
-        cwd = None
-        for key in ("directory", "path"):
-            if key not in row_keys:
-                continue
-            value = row[key]
-            if isinstance(value, str) and value.strip():
-                cwd = value.strip()
-                break
+        cwd = _row_normalized_cwd(row)
 
         metadata: dict[str, Any] = {}
         title = row["title"] if "title" in row_keys else None
@@ -249,10 +312,10 @@ def extract_opencode_db_sessions(
         records.append(
             SessionRecord(
                 tool="opencode",
-                session_id=session_id.strip(),
+                session_id=session_id,
                 path=path,
                 last_write=updated or created or safe_mtime(path),
-                cwd=normalize_cwd(cwd),
+                cwd=cwd,
                 metadata=metadata,
             )
         )
@@ -295,4 +358,6 @@ def load_sessions(
                     continue
                 seen.add(key)
                 records.append(rec)
+        if _records_satisfy_candidates(records, candidates):
+            break
     return records

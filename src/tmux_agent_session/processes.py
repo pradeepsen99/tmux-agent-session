@@ -36,18 +36,73 @@ def parse_etime_to_seconds(raw: str) -> int | None:
 
 
 def get_cwd(pid: int) -> str | None:
+    cwd = _get_proc_cwd(pid)
+    if cwd is not None:
+        return cwd
+
+    return get_cwds([pid]).get(pid)
+
+
+def _get_proc_cwd(pid: int) -> str | None:
     proc_cwd = Path(f"/proc/{pid}/cwd")
     if proc_cwd.exists():
         try:
             return str(proc_cwd.resolve())
         except OSError:
             return None
-
-    output = run_command(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"])
-    for line in output.splitlines():
-        if line.startswith("n"):
-            return line[1:]
     return None
+
+
+def _parse_lsof_cwds(output: str) -> dict[int, str]:
+    cwds: dict[int, str] = {}
+    current_pid: int | None = None
+    for line in output.splitlines():
+        if line.startswith("p"):
+            try:
+                current_pid = int(line[1:])
+            except ValueError:
+                current_pid = None
+        elif line.startswith("n") and current_pid is not None:
+            cwds[current_pid] = line[1:]
+    return cwds
+
+
+def get_cwds(pids: list[int]) -> dict[int, str]:
+    cwds: dict[int, str] = {}
+    unresolved: list[int] = []
+    for pid in dict.fromkeys(pids):
+        cwd = _get_proc_cwd(pid)
+        if cwd is None:
+            unresolved.append(pid)
+        else:
+            cwds[pid] = cwd
+
+    if not unresolved:
+        return cwds
+
+    output = run_command(
+        [
+            "lsof",
+            "-a",
+            "-p",
+            ",".join(str(pid) for pid in unresolved),
+            "-d",
+            "cwd",
+            "-Fn",
+        ]
+    )
+    cwds.update(_parse_lsof_cwds(output))
+    return cwds
+
+
+def resolve_process_cwds(processes: list[ProcessInfo]) -> None:
+    missing = [proc for proc in processes if proc.cwd is None]
+    if not missing:
+        return
+
+    cwd_by_pid = get_cwds([proc.pid for proc in missing])
+    for proc in missing:
+        proc.cwd = cwd_by_pid.get(proc.pid)
 
 
 def normalize_tty(value: str | None) -> str | None:
@@ -66,7 +121,7 @@ def extract_session_ids(command: str) -> list[str]:
     return found
 
 
-def detect_processes() -> list[ProcessInfo]:
+def detect_processes(resolve_cwd: bool = False) -> list[ProcessInfo]:
     ps_output = run_command(["ps", "-axo", "pid=,ppid=,tty=,etime=,command="])
     processes: list[ProcessInfo] = []
     for line in ps_output.splitlines():
@@ -93,9 +148,9 @@ def detect_processes() -> list[ProcessInfo]:
             ProcessInfo(
                 pid=int(pid),
                 ppid=int(ppid),
-                tty=None if tty == "?" else tty,
+                tty=None if tty in {"?", "??"} else tty,
                 etime_seconds=parse_etime_to_seconds(etime),
-                cwd=get_cwd(int(pid)),
+                cwd=get_cwd(int(pid)) if resolve_cwd else None,
                 command=command,
                 tool=tool,
                 session_ids=extract_session_ids(command),
