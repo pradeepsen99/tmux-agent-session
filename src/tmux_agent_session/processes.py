@@ -128,10 +128,13 @@ def detect_processes(resolve_cwd: bool = False) -> list[ProcessInfo]:
         line = line.rstrip()
         if not line:
             continue
-        m = re.match(r"\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(.*)$", line)
-        if not m:
+        parts = line.split(None, 4)
+        if len(parts) != 5:
             continue
-        pid, ppid, tty, etime, command = m.groups()
+        pid, ppid, tty, etime, command = parts
+        lowered_command = command.lower()
+        if "codex" not in lowered_command and "opencode" not in lowered_command:
+            continue
         try:
             argv = shlex.split(command)
         except ValueError:

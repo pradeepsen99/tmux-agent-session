@@ -68,6 +68,26 @@ def test_detect_processes_defers_cwd_lookup_by_default(monkeypatch) -> None:
     assert procs[0].tty is None
 
 
+def test_detect_processes_handles_agent_commands_and_skips_others(monkeypatch) -> None:
+    ps_output = "\n".join(
+        [
+            " 100 1 ttys001 01:02 /usr/local/bin/codex --session abc123 'quoted arg'",
+            " 101 1 ttys002 00:03 /opt/bin/opencode --session=abcdef",
+            " 102 1 ttys003 00:04 python -c 'print(\"codex\")'",
+            " 103 1 ttys004 00:05 codex 'unterminated --session deadbeef12345678",
+        ]
+    )
+    monkeypatch.setattr(processes, "run_command", lambda _cmd: ps_output)
+
+    procs = processes.detect_processes()
+
+    assert [proc.pid for proc in procs] == [100, 101, 103]
+    assert [proc.tool for proc in procs] == ["codex", "opencode", "codex"]
+    assert procs[0].session_ids == ["abc123"]
+    assert procs[1].session_ids == ["abcdef"]
+    assert procs[2].session_ids == ["deadbeef12345678"]
+
+
 def test_normalize_cwd_expands_home_and_resolves_path(tmp_path: Path) -> None:
     child = tmp_path / "repo"
     child.mkdir()

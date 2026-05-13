@@ -44,9 +44,11 @@ def read_jsonl_file(path: Path) -> list[dict[str, Any]]:
 def find_session_files(base: Path) -> Iterable[Path]:
     if not base.exists():
         return []
+    if base.is_file():
+        return [base] if base.suffix in {".json", ".jsonl", ".db"} else []
     candidates: list[Path] = []
-    for pattern in ("*.json", "**/*.json", "*.jsonl", "**/*.jsonl", "*.db", "**/*.db"):
-        candidates.extend(base.glob(pattern))
+    for suffix in (".json", ".jsonl", ".db"):
+        candidates.extend(base.rglob(f"*{suffix}"))
     uniq: dict[str, Path] = {}
     for path in candidates:
         uniq[str(path)] = path

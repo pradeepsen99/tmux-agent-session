@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
 from tmux_agent_session import cli
+from tmux_agent_session.harnesses import codex
 from tmux_agent_session.harnesses import opencode
 
 
@@ -344,6 +346,100 @@ def test_extract_codex_session_falls_back_to_filename_and_none_when_irrelevant(
     assert fallback_record is not None
     assert fallback_record.session_id == "file-derived"
     assert cli.extract_codex_session(irrelevant) is None
+
+
+def test_extract_codex_session_reads_head_and_tail_without_full_scan(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    path = tmp_path / "rollout-large.jsonl"
+    padding = "x" * 2048
+    lines = [
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": "codex-123",
+                    "timestamp": "2024-01-01T00:00:00Z",
+                },
+            }
+        )
+    ]
+    lines.extend(
+        json.dumps(
+            {
+                "type": "message",
+                "payload": {"index": index, "text": padding},
+            }
+        )
+        for index in range(220)
+    )
+    lines.append(
+        json.dumps(
+            {
+                "type": "turn_context",
+                "payload": {
+                    "cwd": str(repo),
+                    "model": "gpt-5",
+                    "summary": "Latest context",
+                },
+            }
+        )
+    )
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+    loads_count = 0
+    original_loads = json.loads
+
+    def counted_loads(raw: str):
+        nonlocal loads_count
+        loads_count += 1
+        return original_loads(raw)
+
+    monkeypatch.setattr(codex.json, "loads", counted_loads)
+    candidates = cli.SessionCandidates(cwds=frozenset({str(repo.resolve())}))
+
+    rec = codex.extract_codex_session(path, candidates)
+
+    assert rec is not None
+    assert rec.session_id == "codex-123"
+    assert rec.cwd == str(repo.resolve())
+    assert rec.metadata["model"] == "gpt-5"
+    assert loads_count < len(lines)
+
+
+def test_codex_load_sessions_stops_after_newest_candidate_match(
+    tmp_path: Path, monkeypatch
+) -> None:
+    target_cwd = str(tmp_path.resolve())
+    older = tmp_path / "rollout-older.jsonl"
+    newer = tmp_path / "rollout-newer.jsonl"
+    older.write_text("{}", encoding="utf-8")
+    newer.write_text("{}", encoding="utf-8")
+    os.utime(older, (1_700_000_000, 1_700_000_000))
+    os.utime(newer, (1_700_000_100, 1_700_000_100))
+    scanned: list[str] = []
+
+    def fake_extract(path: Path, candidates=None):
+        scanned.append(path.name)
+        if path == newer:
+            return cli.SessionRecord(
+                tool="codex",
+                session_id="session-newer",
+                path=path,
+                last_write=1_700_000_100,
+                cwd=target_cwd,
+            )
+        raise AssertionError("older matching files should not be scanned")
+
+    monkeypatch.setattr(codex, "extract_codex_session", fake_extract)
+    candidates = cli.SessionCandidates(cwds=frozenset({target_cwd}))
+
+    records = codex.load_sessions([tmp_path], candidates)
+
+    assert [rec.session_id for rec in records] == ["session-newer"]
+    assert scanned == ["rollout-newer.jsonl"]
 
 
 def test_load_sessions_handles_codex_jsonl_invalid_json_and_dedupes(

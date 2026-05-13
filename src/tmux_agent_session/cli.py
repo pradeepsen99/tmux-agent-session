@@ -151,6 +151,18 @@ def tmux_attached_processes(
     ]
 
 
+def apply_tmux_pane_cwds(processes: list[ProcessInfo], panes: list[TmuxPane]) -> None:
+    cwd_by_tty = {
+        pane.pane_tty: pane.pane_current_path
+        for pane in panes
+        if pane.pane_tty is not None and pane.pane_current_path is not None
+    }
+    for proc in processes:
+        if proc.cwd is not None or proc.tty is None:
+            continue
+        proc.cwd = cwd_by_tty.get(normalize_tty(proc.tty))
+
+
 def build_session_candidates(
     processes: list[ProcessInfo],
 ) -> dict[str, SessionCandidates]:
@@ -194,7 +206,10 @@ def build_records(args: argparse.Namespace) -> list[SessionRecord]:
         processes = [proc for proc in processes if proc.tool == args.tool]
 
     attached_processes = tmux_attached_processes(processes, panes)
-    resolve_process_cwds(attached_processes)
+    apply_tmux_pane_cwds(attached_processes, panes)
+    processes_missing_cwd = [proc for proc in attached_processes if proc.cwd is None]
+    if processes_missing_cwd:
+        resolve_process_cwds(processes_missing_cwd)
     candidates_by_tool = build_session_candidates(attached_processes)
     records: list[SessionRecord] = []
 

@@ -118,6 +118,34 @@ def test_mark_feedback_required_updates_status_and_reason() -> None:
     assert "tmux pane appears to be waiting for user feedback" in rec.reasons
 
 
+def test_mark_feedback_required_captures_duplicate_panes_once() -> None:
+    pane = cli.TmuxPane(
+        session_name="work",
+        window_index="1",
+        window_name="editor",
+        pane_index="0",
+        pane_id="%1",
+        pane_tty="ttys001",
+    )
+    first = make_record(session_id="session-1", minutes_ago=1)
+    second = make_record(session_id="session-2", minutes_ago=1)
+    first.status = "active"
+    second.status = "active"
+    first.tmux_pane = pane
+    second.tmux_pane = pane
+    calls: list[str] = []
+
+    def preview(rec: cli.SessionRecord, _limit: int) -> list[str]:
+        calls.append(rec.session_id)
+        return ["Agent needs user feedback"]
+
+    cli.mark_feedback_required([first, second], preview)
+
+    assert calls == ["session-1"]
+    assert first.status == "waiting"
+    assert second.status == "waiting"
+
+
 def test_add_process_only_records_adds_only_unmatched_processes() -> None:
     matched_proc = make_process(pid=1, session_ids=["session-1"])
     unmatched_proc = make_process(pid=2, session_ids=["session-2"])

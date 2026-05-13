@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 from .models import ProcessInfo, SessionRecord
 from .session_files import normalize_cwd
@@ -102,10 +103,31 @@ def mark_feedback_required(
     preview_callback: Callable[[SessionRecord, int], list[str]],
     limit: int = 30,
 ) -> None:
+    records_by_pane_id: dict[str, SessionRecord] = {}
+    for rec in records:
+        if rec.tmux_pane is None or rec.tmux_pane.pane_id in records_by_pane_id:
+            continue
+        records_by_pane_id[rec.tmux_pane.pane_id] = rec
+
+    if not records_by_pane_id:
+        return
+
+    previews_by_pane_id: dict[str, list[str]] = {}
+    max_workers = min(8, len(records_by_pane_id))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(preview_callback, rec, limit): pane_id
+            for pane_id, rec in records_by_pane_id.items()
+        }
+        for future, pane_id in futures.items():
+            previews_by_pane_id[pane_id] = future.result()
+
     for rec in records:
         if rec.tmux_pane is None:
             continue
-        if not pane_requires_user_feedback(preview_callback(rec, limit)):
+        if not pane_requires_user_feedback(
+            previews_by_pane_id.get(rec.tmux_pane.pane_id, [])
+        ):
             continue
         rec.requires_user_feedback = True
         rec.status = "waiting"
