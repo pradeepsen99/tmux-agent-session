@@ -5,9 +5,24 @@ import os
 import sqlite3
 from pathlib import Path
 
+import hashlib
+
 from tmux_agent_session import cli
 from tmux_agent_session.harnesses import codex
+from tmux_agent_session.harnesses import cursor
 from tmux_agent_session.harnesses import opencode
+
+
+def _write_cursor_store(session_dir: Path, meta: dict) -> Path:
+    session_dir.mkdir(parents=True, exist_ok=True)
+    store = session_dir / "store.db"
+    conn = sqlite3.connect(store)
+    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    payload = json.dumps(meta).encode("utf-8").hex()
+    conn.execute("INSERT INTO meta VALUES (?, ?)", ("0", payload))
+    conn.commit()
+    conn.close()
+    return store
 
 
 def test_read_json_file_handles_valid_invalid_and_missing(tmp_path: Path) -> None:
@@ -478,3 +493,71 @@ def test_load_sessions_handles_codex_jsonl_invalid_json_and_dedupes(
 
     assert [rec.session_id for rec in codex_records] == ["dup-session"]
     assert {rec.session_id for rec in opencode_records} == {"session-1", "invalid"}
+
+
+def test_extract_cursor_session_reads_meta_blob(tmp_path: Path) -> None:
+    agent_id = "67a6fe09-1b5e-4f4f-9fcf-c8e554e8f7ee"
+    store = _write_cursor_store(
+        tmp_path / agent_id,
+        {
+            "agentId": agent_id,
+            "name": "Investigate flaky tests",
+            "mode": "plan",
+            "createdAt": 1_700_000_000_000,
+        },
+    )
+
+    rec = cursor.extract_cursor_session(store, cwd=str(tmp_path))
+
+    assert rec is not None
+    assert rec.tool == "cursor-agent"
+    assert rec.session_id == agent_id
+    assert rec.cwd == str(tmp_path.resolve())
+    assert rec.metadata["title"] == "Investigate flaky tests"
+    assert rec.metadata["mode"] == "plan"
+    assert rec.metadata["created_at"].startswith("20")
+
+
+def test_cursor_load_sessions_resolves_workspace_by_cwd_hash(tmp_path: Path) -> None:
+    base = tmp_path / "chats"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cwd = str(repo.resolve())
+    workspace = base / hashlib.md5(cwd.encode("utf-8")).hexdigest()
+
+    _write_cursor_store(
+        workspace / "11111111-1111-1111-1111-111111111111",
+        {"agentId": "11111111-1111-1111-1111-111111111111", "name": "First"},
+    )
+    _write_cursor_store(
+        workspace / "22222222-2222-2222-2222-222222222222",
+        {"agentId": "22222222-2222-2222-2222-222222222222", "name": "Second"},
+    )
+    # A different workspace that must be ignored when matching by cwd.
+    _write_cursor_store(
+        base / "deadbeef" / "33333333-3333-3333-3333-333333333333",
+        {"agentId": "33333333-3333-3333-3333-333333333333", "name": "Other"},
+    )
+
+    candidates = cli.SessionCandidates(cwds=frozenset({cwd}))
+    records = cursor.load_sessions([base], candidates)
+
+    assert {rec.session_id for rec in records} == {
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222",
+    }
+    assert all(rec.cwd == cwd for rec in records)
+
+
+def test_cursor_load_sessions_matches_by_session_id_scan(tmp_path: Path) -> None:
+    base = tmp_path / "chats"
+    agent_id = "44444444-4444-4444-4444-444444444444"
+    _write_cursor_store(
+        base / "unknownhash" / agent_id,
+        {"agentId": agent_id, "name": "Resumed"},
+    )
+
+    candidates = cli.SessionCandidates(session_ids=frozenset({agent_id}))
+    records = cursor.load_sessions([base], candidates)
+
+    assert [rec.session_id for rec in records] == [agent_id]

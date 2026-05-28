@@ -88,6 +88,26 @@ def test_detect_processes_handles_agent_commands_and_skips_others(monkeypatch) -
     assert procs[2].session_ids == ["deadbeef12345678"]
 
 
+def test_detect_processes_recognizes_cursor_agent_and_skips_worker(monkeypatch) -> None:
+    chat_id = "67a6fe09-1b5e-4f4f-9fcf-c8e554e8f7ee"
+    ps_output = "\n".join(
+        [
+            f" 200 1 ttys005 00:06 /Users/me/.local/bin/agent --use-system-ca "
+            f"/Users/me/.local/share/cursor-agent/versions/2026.05.28/index.js "
+            f"--resume {chat_id}",
+            " 201 200 ?? 00:06 /Users/me/.local/share/cursor-agent/versions/"
+            "2026.05.28/node index.js worker-server",
+        ]
+    )
+    monkeypatch.setattr(processes, "run_command", lambda _cmd: ps_output)
+
+    procs = processes.detect_processes()
+
+    assert [proc.pid for proc in procs] == [200]
+    assert procs[0].tool == "cursor-agent"
+    assert chat_id in procs[0].session_ids
+
+
 def test_normalize_cwd_expands_home_and_resolves_path(tmp_path: Path) -> None:
     child = tmp_path / "repo"
     child.mkdir()

@@ -9,7 +9,9 @@ from .models import ProcessInfo
 
 
 SESSION_ID_PATTERNS = [
-    re.compile(r"(?:--session|session_id|session)\s*[= ]\s*([A-Za-z0-9._:-]{6,})"),
+    re.compile(
+        r"(?:--session|--resume|session_id|session)\s*[= ]\s*([A-Za-z0-9._:-]{6,})"
+    ),
     re.compile(r"\b([a-f0-9]{16,64})\b"),
 ]
 
@@ -133,7 +135,11 @@ def detect_processes(resolve_cwd: bool = False) -> list[ProcessInfo]:
             continue
         pid, ppid, tty, etime, command = parts
         lowered_command = command.lower()
-        if "codex" not in lowered_command and "opencode" not in lowered_command:
+        if (
+            "codex" not in lowered_command
+            and "opencode" not in lowered_command
+            and "cursor-agent" not in lowered_command
+        ):
             continue
         try:
             argv = shlex.split(command)
@@ -145,6 +151,13 @@ def detect_processes(resolve_cwd: bool = False) -> list[ProcessInfo]:
             tool = "codex"
         elif executable in {"opencode", "opencode.exe"}:
             tool = "opencode"
+        elif executable in {"cursor-agent", "cursor-agent.exe"} or (
+            "cursor-agent" in lowered_command and "worker-server" not in lowered_command
+        ):
+            # The cursor-agent launcher execs a bare `agent` binary whose command
+            # line still references the cursor-agent install path. Skip the
+            # detached worker-server child so only interactive sessions surface.
+            tool = "cursor-agent"
         if not tool:
             continue
         processes.append(

@@ -65,6 +65,7 @@ def test_build_records_filters_stale_and_honors_tool_selection(monkeypatch) -> N
         tool="all",
         codex_dir=cli.DEFAULT_CODEX_DIR,
         opencode_dir=[],
+        cursor_dir=cli.DEFAULT_CURSOR_DIR,
         active_minutes=10,
         recent_hours=12,
         include_stale=False,
@@ -72,7 +73,7 @@ def test_build_records_filters_stale_and_honors_tool_selection(monkeypatch) -> N
 
     records = cli.build_records(args)
 
-    assert set(load_calls) == {"codex", "opencode"}
+    assert set(load_calls) == {"codex", "opencode", "cursor-agent"}
     assert [rec.session_id for rec in records] == ["active"]
 
 
@@ -112,6 +113,7 @@ def test_build_records_filters_process_only_records_by_tool(monkeypatch) -> None
         tool="codex",
         codex_dir=cli.DEFAULT_CODEX_DIR,
         opencode_dir=[],
+        cursor_dir=cli.DEFAULT_CURSOR_DIR,
         active_minutes=10,
         recent_hours=12,
         include_stale=False,
@@ -165,6 +167,7 @@ def test_build_records_uses_tmux_pane_cwd_before_lsof(monkeypatch, tmp_path) -> 
         tool="codex",
         codex_dir=cli.DEFAULT_CODEX_DIR,
         opencode_dir=[],
+        cursor_dir=cli.DEFAULT_CURSOR_DIR,
         active_minutes=10,
         recent_hours=12,
         include_stale=False,
@@ -217,6 +220,7 @@ def test_build_records_resolves_cwd_when_pane_has_no_path(monkeypatch, tmp_path)
         tool="codex",
         codex_dir=cli.DEFAULT_CODEX_DIR,
         opencode_dir=[],
+        cursor_dir=cli.DEFAULT_CURSOR_DIR,
         active_minutes=10,
         recent_hours=12,
         include_stale=False,
@@ -275,6 +279,7 @@ def test_build_records_keeps_one_opencode_session_per_tmux_pane(monkeypatch) -> 
         tool="opencode",
         codex_dir=cli.DEFAULT_CODEX_DIR,
         opencode_dir=[],
+        cursor_dir=cli.DEFAULT_CURSOR_DIR,
         active_minutes=10,
         recent_hours=12,
         include_stale=False,
@@ -325,6 +330,7 @@ def test_build_records_marks_sessions_waiting_for_feedback(monkeypatch) -> None:
         tool="codex",
         codex_dir=cli.DEFAULT_CODEX_DIR,
         opencode_dir=[],
+        cursor_dir=cli.DEFAULT_CURSOR_DIR,
         active_minutes=10,
         recent_hours=12,
         include_stale=False,
@@ -355,6 +361,7 @@ def test_build_records_excludes_sessions_without_tmux_panes(monkeypatch) -> None
         tool="codex",
         codex_dir=cli.DEFAULT_CODEX_DIR,
         opencode_dir=[],
+        cursor_dir=cli.DEFAULT_CURSOR_DIR,
         active_minutes=10,
         recent_hours=12,
         include_stale=True,

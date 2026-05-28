@@ -30,6 +30,7 @@ from .formatting import (
 )
 from .harnesses import load_sessions as _load_harness_sessions
 from .harnesses.codex import DEFAULT_CODEX_DIR, extract_codex_session
+from .harnesses.cursor import DEFAULT_CURSOR_DIR, extract_cursor_session
 from .harnesses.opencode import DEFAULT_OPENCODE_DIRS, extract_opencode_sessions
 from .models import ProcessInfo, SessionCandidates, SessionRecord, TmuxPane
 from .processes import (
@@ -226,6 +227,14 @@ def build_records(args: argparse.Namespace) -> list[SessionRecord]:
                 session_candidates_for_tool(candidates_by_tool, "opencode"),
             )
         )
+    if args.tool in ("all", "cursor-agent"):
+        load_tasks.append(
+            (
+                "cursor-agent",
+                [args.cursor_dir],
+                session_candidates_for_tool(candidates_by_tool, "cursor-agent"),
+            )
+        )
 
     if len(load_tasks) == 1:
         tool, paths, candidates = load_tasks[0]
@@ -246,6 +255,7 @@ def build_records(args: argparse.Namespace) -> list[SessionRecord]:
     attach_tmux_panes(records, panes)
     records = [rec for rec in records if rec.tmux_pane is not None]
     records = deduplicate_tmux_pane_records(records, "opencode")
+    records = deduplicate_tmux_pane_records(records, "cursor-agent")
     mark_feedback_required(records, capture_tmux_pane_preview)
     records = sort_records(records)
 
@@ -256,11 +266,17 @@ def build_records(args: argparse.Namespace) -> list[SessionRecord]:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    kwargs = {"description": "List likely active Codex and OpenCode sessions"}
+    kwargs = {
+        "description": "List likely active Codex, OpenCode, and cursor-agent sessions"
+    }
     if Path(sys.argv[0]).name == "__main__.py" and __package__ == "tmux_agent_session":
         kwargs["prog"] = "python -m tmux_agent_session"
     p = argparse.ArgumentParser(**kwargs)
-    p.add_argument("--tool", choices=["all", "codex", "opencode"], default="all")
+    p.add_argument(
+        "--tool",
+        choices=["all", "codex", "opencode", "cursor-agent"],
+        default="all",
+    )
     p.add_argument(
         "--active-minutes",
         type=int,
@@ -284,6 +300,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--codex-dir", type=Path, default=DEFAULT_CODEX_DIR)
     p.add_argument("--opencode-dir", type=Path, action="append", default=[])
+    p.add_argument("--cursor-dir", type=Path, default=DEFAULT_CURSOR_DIR)
     p.add_argument(
         "--include-stale", action="store_true", help="include stale sessions"
     )
