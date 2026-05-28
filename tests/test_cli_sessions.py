@@ -8,9 +8,32 @@ from pathlib import Path
 import hashlib
 
 from tmux_agent_session import cli
+from tmux_agent_session.harnesses import claude
 from tmux_agent_session.harnesses import codex
 from tmux_agent_session.harnesses import cursor
 from tmux_agent_session.harnesses import opencode
+
+
+def _write_claude_transcript(base: Path, cwd: str, session_id: str, **meta) -> Path:
+    project = base / claude.project_dir_name(cwd)
+    project.mkdir(parents=True, exist_ok=True)
+    path = project / f"{session_id}.jsonl"
+    lines = [
+        {"type": "mode", "mode": "normal", "sessionId": session_id},
+        {
+            "type": "user",
+            "sessionId": session_id,
+            "cwd": cwd,
+            "gitBranch": meta.get("gitBranch", "main"),
+            "version": meta.get("version", "2.1.154"),
+            "aiTitle": meta.get("title", "Add claude support"),
+            "message": {"role": "assistant", "model": meta.get("model", "claude-opus-4-8")},
+        },
+    ]
+    path.write_text(
+        "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+    )
+    return path
 
 
 def _write_cursor_store(session_dir: Path, meta: dict) -> Path:
@@ -561,3 +584,57 @@ def test_cursor_load_sessions_matches_by_session_id_scan(tmp_path: Path) -> None
     records = cursor.load_sessions([base], candidates)
 
     assert [rec.session_id for rec in records] == [agent_id]
+
+
+def test_extract_claude_session_reads_metadata(tmp_path: Path) -> None:
+    cwd = str((tmp_path / "repo").resolve())
+    session_id = "558557db-f4d3-46fe-901d-470c3ef7ad77"
+    path = _write_claude_transcript(
+        tmp_path / "projects",
+        cwd,
+        session_id,
+        gitBranch="feature/x",
+        model="claude-opus-4-8",
+        title="Investigate flaky tests",
+    )
+
+    rec = claude.extract_claude_session(path)
+
+    assert rec is not None
+    assert rec.tool == "claude"
+    assert rec.session_id == session_id
+    assert rec.cwd == cwd
+    assert rec.metadata["model"] == "claude-opus-4-8"
+    assert rec.metadata["title"] == "Investigate flaky tests"
+    assert rec.metadata["gitBranch"] == "feature/x"
+
+
+def test_claude_load_sessions_resolves_project_by_cwd(tmp_path: Path) -> None:
+    base = tmp_path / "projects"
+    cwd = str((tmp_path / "ML_ENG" / "app").resolve())
+    _write_claude_transcript(base, cwd, "11111111-1111-1111-1111-111111111111")
+    _write_claude_transcript(base, cwd, "22222222-2222-2222-2222-222222222222")
+    # A different project directory that must be ignored when matching by cwd.
+    other = str((tmp_path / "other").resolve())
+    _write_claude_transcript(base, other, "33333333-3333-3333-3333-333333333333")
+
+    candidates = cli.SessionCandidates(cwds=frozenset({cwd}))
+    records = claude.load_sessions([base], candidates)
+
+    assert {rec.session_id for rec in records} == {
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222",
+    }
+    assert all(rec.cwd == cwd for rec in records)
+
+
+def test_claude_load_sessions_matches_by_session_id_scan(tmp_path: Path) -> None:
+    base = tmp_path / "projects"
+    cwd = str((tmp_path / "repo").resolve())
+    session_id = "44444444-4444-4444-4444-444444444444"
+    _write_claude_transcript(base, cwd, session_id)
+
+    candidates = cli.SessionCandidates(session_ids=frozenset({session_id}))
+    records = claude.load_sessions([base], candidates)
+
+    assert [rec.session_id for rec in records] == [session_id]

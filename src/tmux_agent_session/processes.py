@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import shlex
 from pathlib import Path
@@ -139,6 +140,7 @@ def detect_processes(resolve_cwd: bool = False) -> list[ProcessInfo]:
             "codex" not in lowered_command
             and "opencode" not in lowered_command
             and "cursor-agent" not in lowered_command
+            and "claude" not in lowered_command
         ):
             continue
         try:
@@ -158,6 +160,8 @@ def detect_processes(resolve_cwd: bool = False) -> list[ProcessInfo]:
             # line still references the cursor-agent install path. Skip the
             # detached worker-server child so only interactive sessions surface.
             tool = "cursor-agent"
+        elif executable in {"claude", "claude.exe"}:
+            tool = "claude"
         if not tool:
             continue
         processes.append(
@@ -172,4 +176,61 @@ def detect_processes(resolve_cwd: bool = False) -> list[ProcessInfo]:
                 session_ids=extract_session_ids(command),
             )
         )
+
+    enrich_claude_sessions(processes)
     return processes
+
+
+def claude_live_sessions() -> dict[int, dict]:
+    """Map pid -> live session entry from ``claude agents --json``.
+
+    Claude does not place a session id on its command line, so this is the only
+    reliable bridge from a running ``claude`` process to its session id. Returns
+    an empty mapping when the command is unavailable or its output is not the
+    expected JSON array.
+    """
+    output = run_command(["claude", "agents", "--json"])
+    if not output or not output.strip():
+        return {}
+    try:
+        entries = json.loads(output)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(entries, list):
+        return {}
+
+    sessions: dict[int, dict] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        pid = entry.get("pid")
+        if isinstance(pid, int):
+            sessions[pid] = entry
+    return sessions
+
+
+def enrich_claude_sessions(processes: list[ProcessInfo]) -> None:
+    """Fill in session ids (and cwd) for detected ``claude`` processes.
+
+    Only invokes ``claude agents --json`` when at least one claude process is
+    present, so there is no startup cost when Claude is not running.
+    """
+    claude_procs = [proc for proc in processes if proc.tool == "claude"]
+    if not claude_procs:
+        return
+
+    sessions = claude_live_sessions()
+    if not sessions:
+        return
+
+    for proc in claude_procs:
+        entry = sessions.get(proc.pid)
+        if entry is None:
+            continue
+        session_id = entry.get("sessionId")
+        if isinstance(session_id, str) and session_id not in proc.session_ids:
+            proc.session_ids.append(session_id)
+        if proc.cwd is None:
+            cwd = entry.get("cwd")
+            if isinstance(cwd, str) and cwd.strip():
+                proc.cwd = cwd

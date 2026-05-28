@@ -1,13 +1,15 @@
 # tmux-agent-session
 
-Inspect likely active Codex and OpenCode sessions and map them to tmux panes.
+Inspect likely active Codex, OpenCode, cursor-agent, and Claude sessions and map them to tmux panes.
 
 `tmux-agent-session` provides the full command name, and `tas` is the short alias.
 
 ## What It Does
 
-- Detects running `codex` and `opencode` processes
-- Inspects known session storage directories for both tools
+- Detects running `codex`, `opencode`, `cursor-agent`, and `claude` processes
+- Inspects known session storage directories for each tool
+- For Claude (which carries no session id on its command line), bridges a running
+  process to its session id via `claude agents --json`
 - Correlates sessions by session id, cwd, and recency
 - Classifies sessions as `waiting`, `active`, `recent`, or `stale`
 - Flags tmux-backed sessions that appear to require user feedback
@@ -23,7 +25,7 @@ This tool is intentionally heuristic. It does not depend on an official live ses
 - `lsof`
 - Textual, which brings Rich for terminal rendering, installed automatically from the project dependencies
 
-The tool works best on systems where those commands are available and session metadata is present in the default Codex/OpenCode storage locations.
+The tool works best on systems where those commands are available and session metadata is present in the default Codex/OpenCode/cursor-agent/Claude storage locations. Claude detection additionally relies on the `claude` CLI being on `PATH` (for `claude agents --json`).
 
 ## Installation
 
@@ -129,6 +131,8 @@ Inspect a single tool:
 ```bash
 uv run tas --tool codex
 uv run tas --tool opencode
+uv run tas --tool cursor-agent
+uv run tas --tool claude
 ```
 
 Show scoring reasons and include stale sessions:
@@ -143,6 +147,8 @@ Override the default session directories when needed:
 ```bash
 uv run tas --codex-dir ~/.codex/sessions
 uv run tas --opencode-dir "~/Library/Application Support/opencode/storage"
+uv run tas --cursor-dir ~/.cursor/chats
+uv run tas --claude-dir ~/.claude/projects
 ```
 
 ## Notes

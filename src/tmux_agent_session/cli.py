@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI entry point for inspecting Codex and OpenCode tmux sessions."""
+"""CLI entry point for inspecting Codex, OpenCode, cursor-agent, and Claude tmux sessions."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from .formatting import (
     truncate,
 )
 from .harnesses import load_sessions as _load_harness_sessions
+from .harnesses.claude import DEFAULT_CLAUDE_DIR, extract_claude_session
 from .harnesses.codex import DEFAULT_CODEX_DIR, extract_codex_session
 from .harnesses.cursor import DEFAULT_CURSOR_DIR, extract_cursor_session
 from .harnesses.opencode import DEFAULT_OPENCODE_DIRS, extract_opencode_sessions
@@ -235,6 +236,14 @@ def build_records(args: argparse.Namespace) -> list[SessionRecord]:
                 session_candidates_for_tool(candidates_by_tool, "cursor-agent"),
             )
         )
+    if args.tool in ("all", "claude"):
+        load_tasks.append(
+            (
+                "claude",
+                [args.claude_dir],
+                session_candidates_for_tool(candidates_by_tool, "claude"),
+            )
+        )
 
     if len(load_tasks) == 1:
         tool, paths, candidates = load_tasks[0]
@@ -256,6 +265,7 @@ def build_records(args: argparse.Namespace) -> list[SessionRecord]:
     records = [rec for rec in records if rec.tmux_pane is not None]
     records = deduplicate_tmux_pane_records(records, "opencode")
     records = deduplicate_tmux_pane_records(records, "cursor-agent")
+    records = deduplicate_tmux_pane_records(records, "claude")
     mark_feedback_required(records, capture_tmux_pane_preview)
     records = sort_records(records)
 
@@ -267,14 +277,14 @@ def build_records(args: argparse.Namespace) -> list[SessionRecord]:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     kwargs = {
-        "description": "List likely active Codex, OpenCode, and cursor-agent sessions"
+        "description": "List likely active Codex, OpenCode, cursor-agent, and Claude sessions"
     }
     if Path(sys.argv[0]).name == "__main__.py" and __package__ == "tmux_agent_session":
         kwargs["prog"] = "python -m tmux_agent_session"
     p = argparse.ArgumentParser(**kwargs)
     p.add_argument(
         "--tool",
-        choices=["all", "codex", "opencode", "cursor-agent"],
+        choices=["all", "codex", "opencode", "cursor-agent", "claude"],
         default="all",
     )
     p.add_argument(
@@ -301,6 +311,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--codex-dir", type=Path, default=DEFAULT_CODEX_DIR)
     p.add_argument("--opencode-dir", type=Path, action="append", default=[])
     p.add_argument("--cursor-dir", type=Path, default=DEFAULT_CURSOR_DIR)
+    p.add_argument("--claude-dir", type=Path, default=DEFAULT_CLAUDE_DIR)
     p.add_argument(
         "--include-stale", action="store_true", help="include stale sessions"
     )

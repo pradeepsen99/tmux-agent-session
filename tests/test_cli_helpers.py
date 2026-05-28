@@ -108,6 +108,44 @@ def test_detect_processes_recognizes_cursor_agent_and_skips_worker(monkeypatch) 
     assert chat_id in procs[0].session_ids
 
 
+def test_detect_processes_recognizes_claude_and_enriches_session_id(monkeypatch) -> None:
+    session_id = "558557db-f4d3-46fe-901d-470c3ef7ad77"
+    ps_output = " 300 1 ttys017 00:06 claude\n"
+    agents_json = (
+        '[{"pid": 300, "cwd": "/repo", "kind": "interactive", '
+        f'"sessionId": "{session_id}", "status": "busy"}}]'
+    )
+
+    def fake_run_command(cmd: list[str]) -> str:
+        if cmd[:1] == ["claude"]:
+            return agents_json
+        return ps_output
+
+    monkeypatch.setattr(processes, "run_command", fake_run_command)
+
+    procs = processes.detect_processes()
+
+    assert [proc.pid for proc in procs] == [300]
+    assert procs[0].tool == "claude"
+    assert procs[0].session_ids == [session_id]
+    assert procs[0].cwd == "/repo"
+
+
+def test_detect_processes_skips_claude_agents_call_without_claude(monkeypatch) -> None:
+    ps_output = " 100 1 ttys001 01:02 codex --session abc123\n"
+
+    def fake_run_command(cmd: list[str]) -> str:
+        if cmd[:1] == ["claude"]:
+            raise AssertionError("claude agents --json should not be invoked")
+        return ps_output
+
+    monkeypatch.setattr(processes, "run_command", fake_run_command)
+
+    procs = processes.detect_processes()
+
+    assert [proc.tool for proc in procs] == ["codex"]
+
+
 def test_normalize_cwd_expands_home_and_resolves_path(tmp_path: Path) -> None:
     child = tmp_path / "repo"
     child.mkdir()

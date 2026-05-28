@@ -66,6 +66,7 @@ def test_build_records_filters_stale_and_honors_tool_selection(monkeypatch) -> N
         codex_dir=cli.DEFAULT_CODEX_DIR,
         opencode_dir=[],
         cursor_dir=cli.DEFAULT_CURSOR_DIR,
+        claude_dir=cli.DEFAULT_CLAUDE_DIR,
         active_minutes=10,
         recent_hours=12,
         include_stale=False,
@@ -73,7 +74,7 @@ def test_build_records_filters_stale_and_honors_tool_selection(monkeypatch) -> N
 
     records = cli.build_records(args)
 
-    assert set(load_calls) == {"codex", "opencode", "cursor-agent"}
+    assert set(load_calls) == {"codex", "opencode", "cursor-agent", "claude"}
     assert [rec.session_id for rec in records] == ["active"]
 
 
