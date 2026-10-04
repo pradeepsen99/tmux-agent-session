@@ -8,8 +8,10 @@ from rich.table import Table
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.events import Resize
 from textual.containers import Container, VerticalScroll
-from textual.widgets import DataTable, Footer, Header, Static
+from textual.widgets import OptionList, Static
+from textual.widgets.option_list import Option
 
 from .formatting import (
     display_cwd,
@@ -17,6 +19,7 @@ from .formatting import (
     first_metadata_value,
     format_duration,
     format_ts,
+    group_records_by_directory,
     picker_metadata_items,
     status_text,
 )
@@ -25,7 +28,7 @@ from .session_details import load_session_details
 from .tmux import focus_tmux_pane, tmux_target
 
 
-PICKER_COLUMNS = ("Status", "Tool", "Target", "Model", "CWD")
+PICKER_COLUMNS = ("Directory", "Status", "Tool", "Target", "Model")
 
 
 def move_selection(current: int | None, selectable: list[int], step: int) -> int | None:
@@ -143,66 +146,72 @@ def build_picker_details(
     return lines
 
 
+def session_option(rec: SessionRecord, selected: bool = False) -> Table:
+    title = first_metadata_value(rec, ("title", "summary", "last_user_prompt"))
+    title = " ".join((title or f"{rec.tool} session").split())
+    row = Table.grid(expand=True, padding=(0, 1))
+    row.add_column(ratio=1, overflow="ellipsis", no_wrap=True)
+    row.add_column(justify="right", no_wrap=True)
+    name = Text("› " if selected else "  ", style="bold #65d9ef" if selected else "")
+    marker = "●" if rec.status in {"active", "waiting"} else "○"
+    name.append(f"{marker} ", style=status_text(rec.status).style)
+    name.append(title, style="bold" if selected else "")
+    row.add_row(name, status_text(rec.status))
+    metadata = " · ".join(filter(None, (rec.tool, tmux_target(rec), display_model(rec))))
+    row.add_row(Text(f"    {metadata}", style="#8fb3ca", no_wrap=True, overflow="ellipsis"), Text(""))
+    return row
+
+
 def picker_details_renderable(rec: SessionRecord) -> Table:
-    table = Table.grid(padding=(0, 1))
+    table = Table.grid(padding=(0, 0))
     table.expand = True
-    table.add_column(style="bold cyan", no_wrap=True)
     table.add_column(ratio=1, overflow="fold")
-    for label, value in picker_detail_items(rec):
-        table.add_row(Text(f"{label}:"), Text(value))
+    items = picker_detail_items(rec)
+    title = first_metadata_value(rec, ("title", "summary")) or f"{rec.tool} session"
+    table.add_row(Text(title, style="bold"))
+    table.add_row(status_text(rec.status))
+    items.sort(key=lambda item: 0 if item[0] == "Model" else 1)
+    for label, value in items:
+        if label == "Title":
+            continue
+        table.add_row(Text(""))
+        table.add_row(Text(label, style="#65d9ef"))
+        table.add_row(Text(value))
     return table
 
 
 class SessionPickerApp(App[int]):
     CSS = """
-    Screen {
-        layout: vertical;
+    Screen { layout: vertical; background: ansi_default; color: ansi_default; padding: 1 2; }
+    #heading { height: 1; text-style: bold; color: #65d9ef; }
+    #summary { height: 2; color: #8fb3ca; }
+    #body { height: 1fr; layout: horizontal; border-top: solid #24475c; }
+    #session-list { width: 2fr; height: 100%; padding: 1 1 0 0; }
+    #list-heading { height: 2; color: #8fb3ca; padding-left: 4; }
+    #sessions { width: 100%; height: 1fr; border: none; padding: 0; background: transparent; }
+    #sessions:focus { border: none; background-tint: transparent; }
+    #sessions > .option-list--option { padding: 0; }
+    #sessions > .option-list--option-disabled { color: #65d9ef; text-style: none; }
+    #sessions > .option-list--option-highlighted { background: #102d42; color: #eef8ff; text-style: none; }
+    #sessions > .option-list--option-hover { background: #0b2233; }
+    #sidebar { width: 3fr; min-width: 32; height: 100%; border-left: solid #24475c; padding: 1 2; }
+    #detail-heading { height: 2; color: #8fb3ca; }
+    #details { height: auto; }
+    #sessions, #sidebar {
+        scrollbar-size: 1 1;
+        scrollbar-background: ansi_default;
+        scrollbar-background-hover: ansi_default;
+        scrollbar-background-active: ansi_default;
+        scrollbar-color: #24475c;
+        scrollbar-color-hover: #65d9ef;
+        scrollbar-color-active: #65d9ef;
+        scrollbar-corner-color: ansi_default;
     }
-
-    #body {
-        height: 1fr;
-        layout: horizontal;
-    }
-
-    #sessions {
-        width: 2fr;
-        height: 100%;
-    }
-
-    #sidebar {
-        width: 3fr;
-        min-width: 32;
-        height: 100%;
-        border-left: solid $surface;
-    }
-
-    #details {
-        height: auto;
-        padding: 0 1;
-    }
-
-    #message {
-        height: 1;
-        padding: 0 1;
-        color: $text-muted;
-    }
-
-    #body.narrow {
-        layout: vertical;
-    }
-
-    #sessions.narrow {
-        width: 100%;
-        height: 3fr;
-    }
-
-    #sidebar.narrow {
-        width: 100%;
-        min-width: 1;
-        height: 2fr;
-        border-left: none;
-        border-top: solid $surface;
-    }
+    #message { height: 1; margin-top: 1; color: #8fb3ca; }
+    #keys { height: 1; color: #8fb3ca; }
+    #body.narrow { layout: vertical; }
+    #session-list.narrow { width: 100%; height: 3fr; }
+    #sidebar.narrow { width: 100%; min-width: 1; height: 2fr; border-left: none; border-top: solid #24475c; }
     """
 
     BINDINGS = [
@@ -220,56 +229,66 @@ class SessionPickerApp(App[int]):
         focus_callback: Callable[[SessionRecord], bool] = focus_tmux_pane,
         details_callback: Callable[[SessionRecord], dict[str, str]] = load_session_details,
     ) -> None:
-        super().__init__()
-        self.records = records
+        super().__init__(ansi_color=True)
+        self.directory_groups = group_records_by_directory(records)
+        self.records = [rec for _, group in self.directory_groups for rec in group]
         self.focus_callback = focus_callback
         self.details_callback = details_callback
+        self.selected_option_id: str | None = None
         self.details_cache: dict[int, dict[str, str]] = {}
         self.details_pending: set[int] = set()
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=False)
+        yield Static("Agent sessions  ·  Group: Directory", id="heading")
+        counts = {status: sum(rec.status == status for rec in self.records)
+                  for status in ("waiting", "active", "recent", "stale")}
+        summary = Text(f"All {len(self.records)}", style="bold")
+        for label, status in (("Needs you", "waiting"), ("Working", "active"),
+                              ("Recent", "recent"), ("Inactive", "stale")):
+            summary.append("   ")
+            summary.append(f"{label} {counts[status]}", style=status_text(status).style)
+        yield Static(summary, id="summary")
         with Container(id="body"):
-            yield DataTable(
-                show_row_labels=False,
-                zebra_stripes=True,
-                cursor_type="row",
-                id="sessions",
-            )
+            with Container(id="session-list"):
+                yield Static("Sessions", id="list-heading")
+                yield OptionList(id="sessions")
             with VerticalScroll(id="sidebar"):
+                yield Static("Session details", id="detail-heading")
                 yield Static(id="details", markup=False)
         yield Static(id="message")
-        yield Footer()
+        yield Static(Text.assemble(
+            ("↑/↓", "#65d9ef"), " move   ", ("j/k", "#65d9ef"), " move   ",
+            ("enter", "#65d9ef"), " focus   ", ("q / esc", "#65d9ef"), " quit",
+        ), id="keys")
 
     def on_mount(self) -> None:
-        self.title = "Session Picker"
-        self.sub_title = (
-            f"{len(self.records)} shown, {self.focusable_count} focusable"
-        )
+        self.title = "Agent sessions"
         self.apply_responsive_layout(self.size.width)
-        table = self.query_one("#sessions", DataTable)
-        for column in PICKER_COLUMNS:
-            table.add_column(column)
-
-        for index, rec in enumerate(self.records):
-            table.add_row(*rich_picker_row_cells(rec), key=str(index))
+        sessions = self.query_one("#sessions", OptionList)
+        index = 0
+        for group_index, (directory, group) in enumerate(self.directory_groups):
+            heading = Text(("\n" if group_index else "") + directory, style="bold #65d9ef")
+            heading.append(f"  {len(group)}", style="#8fb3ca")
+            sessions.add_option(Option(heading, id=f"directory-{group_index}", disabled=True))
+            for rec in group:
+                sessions.add_option(Option(session_option(rec), id=str(index)))
+                index += 1
 
         initial_index = first_focusable_index(self.records)
         if initial_index is None:
             self.update_message("No sessions available. Press q to exit.")
             self.update_details(None)
             return
-
-        table.focus()
-        table.move_cursor(row=initial_index, column=0, animate=False)
+        sessions.highlighted = sessions.get_option_index(str(initial_index))
+        sessions.focus()
         self.update_selected_record()
 
-    def on_resize(self, _event: object) -> None:
-        self.apply_responsive_layout(self.size.width)
+    def on_resize(self, event: Resize) -> None:
+        self.apply_responsive_layout(event.size.width)
 
     def apply_responsive_layout(self, width: int) -> None:
         narrow = width < 88
-        for selector in ("#body", "#sessions", "#sidebar"):
+        for selector in ("#body", "#session-list", "#sidebar"):
             self.query_one(selector).set_class(narrow, "narrow")
 
     @property
@@ -277,26 +296,22 @@ class SessionPickerApp(App[int]):
         return sum(1 for rec in self.records if rec.tmux_pane is not None)
 
     def selected_record(self) -> SessionRecord | None:
-        table = self.query_one("#sessions", DataTable)
-        if table.row_count == 0:
+        option = self.query_one("#sessions", OptionList).highlighted_option
+        if option is None or option.disabled or option.id is None:
             return None
-        if 0 <= table.cursor_row < len(self.records):
-            return self.records[table.cursor_row]
-        return None
+        return self.records[int(option.id)]
 
-    def on_data_table_row_highlighted(
-        self, _event: DataTable.RowHighlighted
-    ) -> None:
+    def on_option_list_option_highlighted(self, _event: OptionList.OptionHighlighted) -> None:
         self.update_selected_record()
 
-    def on_data_table_row_selected(self, _event: DataTable.RowSelected) -> None:
+    def on_option_list_option_selected(self, _event: OptionList.OptionSelected) -> None:
         self.action_focus_selected()
 
     def action_cursor_down(self) -> None:
-        self.query_one("#sessions", DataTable).action_cursor_down()
+        self.query_one("#sessions", OptionList).action_cursor_down()
 
     def action_cursor_up(self) -> None:
-        self.query_one("#sessions", DataTable).action_cursor_up()
+        self.query_one("#sessions", OptionList).action_cursor_up()
 
     def action_cancel(self) -> None:
         self.exit(1)
@@ -315,6 +330,15 @@ class SessionPickerApp(App[int]):
         self.update_message(f"Failed to focus {tmux_target(rec)}.")
 
     def update_selected_record(self) -> None:
+        sessions = self.query_one("#sessions", OptionList)
+        if self.selected_option_id is not None:
+            index = int(self.selected_option_id)
+            sessions.replace_option_prompt(self.selected_option_id, session_option(self.records[index]))
+        option = sessions.highlighted_option
+        self.selected_option_id = option.id if option is not None and not option.disabled else None
+        if self.selected_option_id is not None:
+            index = int(self.selected_option_id)
+            sessions.replace_option_prompt(self.selected_option_id, session_option(self.records[index], True))
         rec = self.selected_record()
         self.update_details(rec)
         if rec is None:
@@ -329,10 +353,10 @@ class SessionPickerApp(App[int]):
             self.update_message("Selected session has no tmux target.")
         elif rec.requires_user_feedback:
             self.update_message(
-                "Feedback required. Enter to focus, j/k or arrows to move, q to quit."
+                "Feedback required. Enter to focus."
             )
         else:
-            self.update_message("Enter to focus, j/k or arrows to move, q to quit.")
+            self.update_message(f"{rec.tool} · {tmux_target(rec)}")
 
     def update_details(self, rec: SessionRecord | None) -> None:
         details = self.query_one("#details", Static)
@@ -356,6 +380,10 @@ class SessionPickerApp(App[int]):
             self.details_pending.discard(key)
         self.details_cache[key] = metadata
         rec.metadata.update(metadata)
+        index = next(index for index, record in enumerate(self.records) if record is rec)
+        self.query_one("#sessions", OptionList).replace_option_prompt(
+            str(index), session_option(rec, self.selected_record() is rec)
+        )
         if self.selected_record() is rec:
             self.query_one("#details", Static).update(picker_details_renderable(rec))
 

@@ -113,10 +113,14 @@ def test_textual_picker_expands_details_panel_on_wide_layout() -> None:
 
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            sessions = app.query_one("#sessions")
+            sessions = app.query_one("#session-list")
             sidebar = app.query_one("#sidebar")
             assert sidebar.region.x == sessions.region.x + sessions.region.width
             assert sidebar.region.width > sessions.region.width
+            await pilot.resize_terminal(60, 24)
+            await pilot.pause()
+            assert app.query_one("#body").has_class("narrow")
+            assert sidebar.region.y >= sessions.region.bottom
             await pilot.press("q")
 
     asyncio.run(scenario())
@@ -175,5 +179,52 @@ def test_slow_details_do_not_block_navigation_or_replace_new_selection() -> None
                 await pilot.press("q")
             finally:
                 release.set()
+
+    asyncio.run(scenario())
+
+
+def test_picker_groups_directories_and_focuses_the_displayed_record() -> None:
+    async def scenario() -> None:
+        records = [make_record("z-first"), make_record("a"), make_record("z-second")]
+        for rec, cwd in zip(records, ["/tmp/zeta", "/tmp/alpha", "/tmp/zeta"]):
+            rec.cwd = cwd
+        focused: list[str] = []
+        app = cli.SessionPickerApp(
+            records,
+            focus_callback=lambda rec: focused.append(rec.session_id) or True,
+            details_callback=lambda rec: {"title": rec.session_id},
+        )
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            table = app.query_one("#sessions")
+            assert table.get_option("directory-0").prompt.plain == "alpha  1"
+            assert table.get_option("directory-1").prompt.plain == "\nzeta  2"
+            assert table.get_option("directory-0").disabled
+            assert table.get_option("directory-1").disabled
+            assert app.selected_record() is records[1]
+            await pilot.press("down")
+            assert app.selected_record() is records[0]
+            await pilot.press("j")
+            assert app.selected_record() is records[2]
+            await pilot.press("k")
+            assert app.selected_record() is records[0]
+            await pilot.press("enter")
+        assert focused == ["z-first"]
+        assert [rec.session_id for rec in records] == ["z-first", "a", "z-second"]
+
+    asyncio.run(scenario())
+
+
+def test_picker_empty_and_small_layout() -> None:
+    async def scenario() -> None:
+        app = cli.SessionPickerApp([], details_callback=lambda _rec: {})
+        async with app.run_test(size=(60, 20)) as pilot:
+            await pilot.pause()
+            assert app.selected_record() is None
+            assert app.query_one("#body").has_class("narrow")
+            await pilot.press("down", "enter")
+            assert app.query_one("#message").content == "No sessions available. Press q to exit."
+            await pilot.press("escape")
+        assert app.return_value == 1
 
     asyncio.run(scenario())

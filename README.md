@@ -112,6 +112,8 @@ List active or recent sessions with the Rich-rendered table output:
 uv run tmux-agent-session
 ```
 
+The printed list and interactive picker group sessions alphabetically by working directory, preserving session priority within each group. Directories with matching names show full paths; sessions without a known directory appear last.
+
 Emit machine-readable JSON:
 
 ```bash
@@ -126,7 +128,7 @@ uv run tas --pick
 
 The picker’s scrollable right panel shows the session title, project, Git branch, last user prompt, and latest user or assistant text message. Details load in the background when a session is selected and are cached until the picker closes. Codex titles come from its session index; OpenCode conversation text comes from its SQLite message parts. Missing fields are marked unavailable, long messages are truncated, and a recorded branch is labeled when the current Git branch cannot be read. Legacy OpenCode JSON storage still shows available session metadata.
 
-The picker supports native table navigation with arrow keys, `j`/`k`, `Enter` to focus a tmux-backed row, and `q` or `Esc` to quit.
+The picker uses a Codex-style agents layout with directory headings, status dots, task titles, a selection chevron, and a details panel. Directory headings are skipped during navigation. It supports with arrow keys, `j`/`k`, `Enter` to focus a tmux-backed row, and `q` or `Esc` to quit.
 
 Inspect a single tool:
 

@@ -141,6 +141,29 @@ def display_cwd(rec: SessionRecord) -> str | None:
     return Path(cwd).name or cwd
 
 
+def group_records_by_directory(
+    records: list[SessionRecord],
+) -> list[tuple[str, list[SessionRecord]]]:
+    """Group by full cwd, keeping the existing session order within each group."""
+    groups: dict[str, list[SessionRecord]] = {}
+    for rec in records:
+        cwd = rec.cwd or (rec.matched_process.cwd if rec.matched_process else None)
+        key = str(Path(cwd)) if cwd else ""
+        groups.setdefault(key, []).append(rec)
+
+    names = {cwd: Path(cwd).name or cwd for cwd in groups if cwd}
+    counts: dict[str, int] = {}
+    for name in names.values():
+        counts[name] = counts.get(name, 0) + 1
+
+    result = []
+    for cwd in sorted(groups, key=lambda cwd: (not cwd, names.get(cwd, "").casefold(), cwd)):
+        name = names.get(cwd, "Unknown directory")
+        label = cwd if cwd and counts[name] > 1 else name
+        result.append((label, groups[cwd]))
+    return result
+
+
 def display_model(rec: SessionRecord) -> str | None:
     model = first_metadata_value(rec, ("model",))
     if model:
@@ -150,10 +173,10 @@ def display_model(rec: SessionRecord) -> str | None:
 
 
 STATUS_STYLES = {
-    "waiting": "bold red",
-    "active": "bold green",
-    "recent": "yellow",
-    "stale": "dim cyan",
+    "waiting": "bold #f2bf75",
+    "active": "bold #69d6a2",
+    "recent": "#83b8ef",
+    "stale": "#b6a0d9",
 }
 
 
@@ -195,32 +218,35 @@ def record_details(rec: SessionRecord) -> str:
 
 
 def print_table(records: list[SessionRecord], console: Any | None = None) -> None:
-    from rich import box
     from rich.console import Console
     from rich.table import Table
+    from rich.text import Text
 
-    table = Table(
-        box=box.ASCII,
-        expand=True,
-        show_lines=False,
-        header_style="bold",
-    )
-    table.add_column("TOOL", no_wrap=True)
-    table.add_column("STATUS", no_wrap=True)
-    table.add_column("TARGET", no_wrap=True)
-    table.add_column("CWD", ratio=1, min_width=10, overflow="ellipsis")
-    table.add_column("DETAILS", ratio=2, min_width=18, overflow="fold")
-
-    for rec in records:
-        table.add_row(
-            rec.tool,
-            status_text(rec.status),
-            tmux_target(rec),
-            display_cwd(rec) or "—",
-            record_details(rec),
-        )
-
-    (console or Console()).print(table)
+    output = console or Console()
+    output.print(Text("Agent sessions  ·  Group: Directory", style="bold"))
+    if not records:
+        output.print(Text("No sessions available.", style="dim"))
+    for directory, group in group_records_by_directory(records):
+        output.print()
+        heading = Text(directory, style="bold")
+        heading.append(f"  {len(group)}", style="dim")
+        output.print(heading)
+        table = Table(box=None, expand=True, padding=(0, 1), header_style="dim")
+        table.add_column("", width=1)
+        table.add_column("TOOL", no_wrap=True)
+        table.add_column("STATUS", no_wrap=True)
+        table.add_column("TARGET", no_wrap=True)
+        table.add_column("DETAILS", ratio=1, overflow="fold")
+        for rec in group:
+            marker = "●" if rec.status in {"waiting", "active"} else "○"
+            table.add_row(
+                Text(marker, style=status_text(rec.status).style),
+                rec.tool,
+                status_text(rec.status),
+                tmux_target(rec),
+                Text(record_details(rec)),
+            )
+        output.print(table)
 
 
 def print_json(records: list[SessionRecord]) -> None:

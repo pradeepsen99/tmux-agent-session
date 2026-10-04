@@ -135,3 +135,43 @@ def test_details_render_message_markup_literally() -> None:
         console.print(cli.picker_details_renderable(rec))
     assert "[red]literal[/red]" in capture.get()
     assert "second line" in capture.get()
+
+
+def test_directory_groups_keep_priority_and_disambiguate_paths() -> None:
+    from tmux_agent_session.formatting import group_records_by_directory
+
+    records = [make_record() for _ in range(6)]
+    for index, rec in enumerate(records):
+        rec.session_id = str(index)
+    for rec, cwd in zip(records, ["/z/project", "/tmp/alpha", "/a/project", "/z/project", None, None]):
+        rec.cwd = cwd
+    records[4].matched_process.cwd = "/tmp/alpha"
+    records[5].matched_process = None
+
+    groups = group_records_by_directory(records)
+
+    assert [(label, [records.index(rec) for rec in group]) for label, group in groups] == [
+        ("alpha", [1, 4]),
+        ("/a/project", [2]),
+        ("/z/project", [0, 3]),
+        ("Unknown directory", [5]),
+    ]
+    assert groups[2][1][0] is records[0]
+    assert groups[2][1][1] is records[3]
+    assert group_records_by_directory([]) == []
+
+
+def test_print_table_groups_directories_and_renders_labels_literally() -> None:
+    from rich.console import Console
+
+    records = [make_record() for _ in range(3)]
+    for index, (rec, cwd) in enumerate(zip(records, ["/tmp/zeta", "/tmp/[red]alpha", "/tmp/zeta"])):
+        rec.cwd = cwd
+        rec.metadata["summary"] = f"row-{index}"
+    console = Console(width=160)
+    with console.capture() as capture:
+        cli.print_table(records, console=console)
+    output = capture.get()
+    assert "[red]alpha" in output
+    assert output.count("zeta") == 1
+    assert output.index("row-1") < output.index("row-0") < output.index("row-2")
