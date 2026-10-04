@@ -111,11 +111,27 @@ def test_build_picker_details_includes_feedback_state() -> None:
     assert "Feedback: requires user feedback" in "\n".join(lines)
 
 
-def test_build_picker_details_includes_pane_preview() -> None:
-    lines = cli.build_picker_details(
-        make_record(), 80, pane_preview=["$ ls", "README.md"]
-    )
+def test_build_picker_details_includes_conversation_metadata() -> None:
+    rec = make_record()
+    rec.metadata.update({
+        "title": "Fix parser", "project": "My project", "git_branch": "fix/parser",
+        "last_user_prompt": "Please fix parsing", "last_message": "Fixed it",
+        "last_message_role": "assistant",
+    })
+    joined = "\n".join(cli.build_picker_details(rec, 80))
+    assert "Title: Fix parser" in joined
+    assert "Project: My project" in joined
+    assert "Git branch: fix/parser" in joined
+    assert "Last user prompt: Please fix parsing" in joined
+    assert "Last message (assistant): Fixed it" in joined
 
-    joined = "\n".join(lines)
-    assert "Preview: $ ls" in joined
-    assert "README.md" in joined
+
+def test_details_render_message_markup_literally() -> None:
+    from rich.console import Console
+    rec = make_record()
+    rec.metadata["last_message"] = "[red]literal[/red]\nsecond line"
+    console = Console(width=120)
+    with console.capture() as capture:
+        console.print(cli.picker_details_renderable(rec))
+    assert "[red]literal[/red]" in capture.get()
+    assert "second line" in capture.get()

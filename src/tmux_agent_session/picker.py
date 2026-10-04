@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import textwrap
 from collections.abc import Callable
 
@@ -7,19 +8,21 @@ from rich.table import Table
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical
-from textual.widgets import DataTable, Footer, Header, RichLog, Static
+from textual.containers import Container, VerticalScroll
+from textual.widgets import DataTable, Footer, Header, Static
 
 from .formatting import (
     display_cwd,
     display_model,
+    first_metadata_value,
     format_duration,
     format_ts,
     picker_metadata_items,
     status_text,
 )
 from .models import SessionRecord
-from .tmux import capture_tmux_pane_preview, focus_tmux_pane, tmux_target
+from .session_details import load_session_details
+from .tmux import focus_tmux_pane, tmux_target
 
 
 PICKER_COLUMNS = ("Status", "Tool", "Target", "Model", "CWD")
@@ -82,7 +85,17 @@ def append_detail(lines: list[str], label: str, value: str | None, width: int) -
 
 
 def picker_detail_items(rec: SessionRecord) -> list[tuple[str, str]]:
-    items = [("Session", rec.session_id)]
+    role = first_metadata_value(rec, ("last_message_role",))
+    last_message_label = f"Last message ({role})" if role else "Last message"
+    branch_label = "Git branch (recorded)" if rec.metadata.get("recorded_branch") and not rec.metadata.get("git_branch") else "Git branch"
+    items = [
+        ("Title", first_metadata_value(rec, ("title",)) or "Unavailable"),
+        ("Project", first_metadata_value(rec, ("project",)) or display_cwd(rec) or "Unavailable"),
+        (branch_label, first_metadata_value(rec, ("git_branch", "recorded_branch")) or "Unavailable"),
+        ("Last user prompt", first_metadata_value(rec, ("last_user_prompt",)) or "Unavailable"),
+        (last_message_label, first_metadata_value(rec, ("last_message",)) or "Unavailable"),
+        ("Session", rec.session_id),
+    ]
     if rec.requires_user_feedback:
         items.append(("Feedback", "requires user feedback"))
     cwd = display_cwd(rec)
@@ -119,15 +132,11 @@ def picker_detail_items(rec: SessionRecord) -> list[tuple[str, str]]:
 
 
 def build_picker_details(
-    rec: SessionRecord, width: int, pane_preview: list[str] | None = None
+    rec: SessionRecord, width: int
 ) -> list[str]:
     lines: list[str] = []
     for label, value in picker_detail_items(rec):
         append_detail(lines, label, value, width)
-
-    if pane_preview:
-        for index, line in enumerate(pane_preview):
-            append_detail(lines, "Preview" if index == 0 else "", line, width)
 
     if not lines:
         lines.append("No additional metadata for this session.")
@@ -140,7 +149,7 @@ def picker_details_renderable(rec: SessionRecord) -> Table:
     table.add_column(style="bold cyan", no_wrap=True)
     table.add_column(ratio=1, overflow="fold")
     for label, value in picker_detail_items(rec):
-        table.add_row(f"{label}:", value)
+        table.add_row(Text(f"{label}:"), Text(value))
     return table
 
 
@@ -169,14 +178,6 @@ class SessionPickerApp(App[int]):
 
     #details {
         height: auto;
-        max-height: 40%;
-        padding: 0 1;
-        border-bottom: solid $surface;
-    }
-
-    #preview {
-        height: 1fr;
-        min-width: 1;
         padding: 0 1;
     }
 
@@ -217,16 +218,14 @@ class SessionPickerApp(App[int]):
         records: list[SessionRecord],
         *,
         focus_callback: Callable[[SessionRecord], bool] = focus_tmux_pane,
-        preview_callback: Callable[[SessionRecord, int], list[str]]
-        = capture_tmux_pane_preview,
-        preview_limit: int = 120,
+        details_callback: Callable[[SessionRecord], dict[str, str]] = load_session_details,
     ) -> None:
         super().__init__()
         self.records = records
         self.focus_callback = focus_callback
-        self.preview_callback = preview_callback
-        self.preview_limit = preview_limit
-        self.preview_cache: dict[str, list[str]] = {}
+        self.details_callback = details_callback
+        self.details_cache: dict[int, dict[str, str]] = {}
+        self.details_pending: set[int] = set()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -237,15 +236,8 @@ class SessionPickerApp(App[int]):
                 cursor_type="row",
                 id="sessions",
             )
-            with Vertical(id="sidebar"):
-                yield Static(id="details")
-                yield RichLog(
-                    id="preview",
-                    wrap=False,
-                    highlight=False,
-                    markup=False,
-                    auto_scroll=False,
-                )
+            with VerticalScroll(id="sidebar"):
+                yield Static(id="details", markup=False)
         yield Static(id="message")
         yield Footer()
 
@@ -265,7 +257,7 @@ class SessionPickerApp(App[int]):
         initial_index = first_focusable_index(self.records)
         if initial_index is None:
             self.update_message("No sessions available. Press q to exit.")
-            self.update_preview(None)
+            self.update_details(None)
             return
 
         table.focus()
@@ -324,7 +316,7 @@ class SessionPickerApp(App[int]):
 
     def update_selected_record(self) -> None:
         rec = self.selected_record()
-        self.update_preview(rec)
+        self.update_details(rec)
         if rec is None:
             self.update_message("No sessions available. Press q to exit.")
             return
@@ -342,33 +334,30 @@ class SessionPickerApp(App[int]):
         else:
             self.update_message("Enter to focus, j/k or arrows to move, q to quit.")
 
-    def update_preview(self, rec: SessionRecord | None) -> None:
+    def update_details(self, rec: SessionRecord | None) -> None:
         details = self.query_one("#details", Static)
-        preview = self.query_one("#preview", RichLog)
-        preview.clear()
-
         if rec is None:
             details.update("No session selected.")
-            preview.write(Text("No preview available.", style="dim"))
             return
-
         details.update(picker_details_renderable(rec))
-        if rec.tmux_pane is None:
-            preview.write(Text("No focusable tmux target for this session.", style="dim"))
-            return
+        key = id(rec)
+        if key not in self.details_cache and key not in self.details_pending:
+            self.details_pending.add(key)
+            self.run_worker(self.fetch_details(rec), group="session-details")
 
-        pane_id = rec.tmux_pane.pane_id
-        lines = self.preview_cache.get(pane_id)
-        if lines is None:
-            lines = self.preview_callback(rec, self.preview_limit)
-            self.preview_cache[pane_id] = lines
-
-        if not lines:
-            preview.write(Text("Preview unavailable.", style="dim"))
-            return
-
-        for line in lines:
-            preview.write(Text.from_ansi(line))
+    async def fetch_details(self, rec: SessionRecord) -> None:
+        key = id(rec)
+        try:
+            metadata = await asyncio.to_thread(self.details_callback, rec)
+        except Exception:
+            # Unreadable or changing storage must not close the picker.
+            metadata = {}
+        finally:
+            self.details_pending.discard(key)
+        self.details_cache[key] = metadata
+        rec.metadata.update(metadata)
+        if self.selected_record() is rec:
+            self.query_one("#details", Static).update(picker_details_renderable(rec))
 
     def update_message(self, message: str) -> None:
         self.query_one("#message", Static).update(message)

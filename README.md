@@ -124,6 +124,8 @@ Open the Textual interactive picker and jump to the selected tmux pane:
 uv run tas --pick
 ```
 
+The picker’s scrollable right panel shows the session title, project, Git branch, last user prompt, and latest user or assistant text message. Details load in the background when a session is selected and are cached until the picker closes. Codex titles come from its session index; OpenCode conversation text comes from its SQLite message parts. Missing fields are marked unavailable, long messages are truncated, and a recorded branch is labeled when the current Git branch cannot be read. Legacy OpenCode JSON storage still shows available session metadata.
+
 The picker supports native table navigation with arrow keys, `j`/`k`, `Enter` to focus a tmux-backed row, and `q` or `Esc` to quit.
 
 Inspect a single tool:

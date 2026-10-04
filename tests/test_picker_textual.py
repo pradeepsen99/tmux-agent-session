@@ -33,7 +33,7 @@ def make_record(session_id: str, *, focusable: bool = True) -> cli.SessionRecord
 
 def test_textual_picker_quits_with_q() -> None:
     async def scenario() -> None:
-        app = cli.SessionPickerApp([make_record("abc")])
+        app = cli.SessionPickerApp([make_record("abc")], details_callback=lambda _rec: {})
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             assert app.selected_record().session_id == "abc"
@@ -51,7 +51,7 @@ def test_textual_picker_handles_non_focusable_selection_and_focuses_target() -> 
         app = cli.SessionPickerApp(
             records,
             focus_callback=lambda rec: focused.append(rec.session_id) or True,
-            preview_callback=lambda _rec, _limit: ["preview"],
+            details_callback=lambda _rec: {"title": "Session title"},
         )
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -79,38 +79,36 @@ def test_textual_picker_handles_non_focusable_selection_and_focuses_target() -> 
     asyncio.run(scenario())
 
 
-def test_textual_picker_caches_tmux_preview_and_uses_responsive_layout() -> None:
+def test_textual_picker_caches_details_and_uses_responsive_layout() -> None:
     async def scenario() -> None:
-        previews: list[tuple[str, int]] = []
+        loaded: list[str] = []
 
-        def preview_callback(rec: cli.SessionRecord, limit: int) -> list[str]:
-            previews.append((rec.session_id, limit))
-            return ["\x1b[31mred\x1b[0m"]
+        def details_callback(rec: cli.SessionRecord) -> dict[str, str]:
+            loaded.append(rec.session_id)
+            return {"title": "Fix [red]literal[/red]", "last_user_prompt": "Please fix it"}
 
-        app = cli.SessionPickerApp(
-            [make_record("abc")],
-            focus_callback=lambda _rec: True,
-            preview_callback=preview_callback,
-            preview_limit=7,
-        )
-
+        record = make_record("abc")
+        app = cli.SessionPickerApp([record], details_callback=details_callback)
         async with app.run_test(size=(70, 24)) as pilot:
+            await app.workers.wait_for_complete()
             await pilot.pause()
             assert app.query_one("#body").has_class("narrow")
-            assert app.preview_cache == {"%abc": ["\x1b[31mred\x1b[0m"]}
+            assert app.details_cache[id(record)]["title"] == "Fix [red]literal[/red]"
+            assert record.metadata["last_user_prompt"] == "Please fix it"
+            assert not app.query("#preview")
+            app.update_selected_record()
             await pilot.press("q")
-
-        assert previews == [("abc", 7)]
+        assert loaded == ["abc"]
 
     asyncio.run(scenario())
 
 
-def test_textual_picker_expands_preview_panel_on_wide_layout() -> None:
+def test_textual_picker_expands_details_panel_on_wide_layout() -> None:
     async def scenario() -> None:
         app = cli.SessionPickerApp(
             [make_record("abc")],
             focus_callback=lambda _rec: True,
-            preview_callback=lambda _rec, _limit: ["preview"],
+            details_callback=lambda _rec: {"title": "Session title"},
         )
 
         async with app.run_test(size=(120, 30)) as pilot:
@@ -132,12 +130,50 @@ def test_textual_picker_message_calls_out_feedback_required() -> None:
         app = cli.SessionPickerApp(
             [rec],
             focus_callback=lambda _rec: True,
-            preview_callback=lambda _rec, _limit: ["Waiting for user input"],
+            details_callback=lambda _rec: {},
         )
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             assert app.query_one("#message").content.startswith("Feedback required.")
             await pilot.press("q")
+
+    asyncio.run(scenario())
+
+
+def test_slow_details_do_not_block_navigation_or_replace_new_selection() -> None:
+    import threading
+
+    async def scenario() -> None:
+        release = threading.Event()
+        started = threading.Event()
+        records = [make_record("slow"), make_record("fast")]
+
+        def load(rec: cli.SessionRecord) -> dict[str, str]:
+            if rec.session_id == "slow":
+                started.set()
+                release.wait(timeout=5)
+            return {"title": rec.session_id + " title"}
+
+        app = cli.SessionPickerApp(records, details_callback=load)
+        async with app.run_test(size=(120, 30)) as pilot:
+            try:
+                await asyncio.to_thread(started.wait, 2)
+                await pilot.press("j")
+                await pilot.pause()
+                assert app.selected_record() is records[1]
+                release.set()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                table = app.query_one("#details").content
+                from rich.console import Console
+                console = Console(width=100)
+                with console.capture() as capture:
+                    console.print(table)
+                assert "fast title" in capture.get()
+                assert "slow title" not in capture.get()
+                await pilot.press("q")
+            finally:
+                release.set()
 
     asyncio.run(scenario())
