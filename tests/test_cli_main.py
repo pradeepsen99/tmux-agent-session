@@ -234,7 +234,8 @@ def test_build_records_resolves_cwd_when_pane_has_no_path(monkeypatch, tmp_path)
     assert records[0].cwd == str(tmp_path.resolve())
 
 
-def test_build_records_keeps_one_opencode_session_per_tmux_pane(monkeypatch) -> None:
+@pytest.mark.parametrize("tool", ["codex", "opencode"])
+def test_build_records_keeps_one_session_per_tmux_pane(monkeypatch, tool) -> None:
     now = dt.datetime.now().timestamp()
     cwd = cli.normalize_cwd("/tmp/repo")
     proc = cli.ProcessInfo(
@@ -243,8 +244,8 @@ def test_build_records_keeps_one_opencode_session_per_tmux_pane(monkeypatch) -> 
         tty="ttys001",
         etime_seconds=30,
         cwd="/tmp/repo",
-        command="opencode",
-        tool="opencode",
+        command=tool,
+        tool=tool,
     )
     pane = cli.TmuxPane(
         session_name="work",
@@ -255,14 +256,14 @@ def test_build_records_keeps_one_opencode_session_per_tmux_pane(monkeypatch) -> 
         pane_tty="ttys001",
     )
     older = cli.SessionRecord(
-        tool="opencode",
+        tool=tool,
         session_id="older",
         path=None,
         last_write=now - 1_800,
         cwd=cwd,
     )
     newer = cli.SessionRecord(
-        tool="opencode",
+        tool=tool,
         session_id="newer",
         path=None,
         last_write=now - 60,
@@ -277,7 +278,7 @@ def test_build_records_keeps_one_opencode_session_per_tmux_pane(monkeypatch) -> 
     monkeypatch.setattr(cli, "capture_tmux_pane_preview", lambda _rec, _limit: [])
 
     args = argparse.Namespace(
-        tool="opencode",
+        tool=tool,
         codex_dir=cli.DEFAULT_CODEX_DIR,
         opencode_dir=[],
         cursor_dir=cli.DEFAULT_CURSOR_DIR,

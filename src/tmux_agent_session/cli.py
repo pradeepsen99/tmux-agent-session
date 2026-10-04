@@ -263,9 +263,8 @@ def build_records(args: argparse.Namespace) -> list[SessionRecord]:
     records = add_process_only_records(records, processes)
     attach_tmux_panes(records, panes)
     records = [rec for rec in records if rec.tmux_pane is not None]
-    records = deduplicate_tmux_pane_records(records, "opencode")
-    records = deduplicate_tmux_pane_records(records, "cursor-agent")
-    records = deduplicate_tmux_pane_records(records, "claude")
+    for tool in ("codex", "opencode", "cursor-agent", "claude"):
+        records = deduplicate_tmux_pane_records(records, tool)
     mark_feedback_required(records, capture_tmux_pane_preview)
     records = sort_records(records)
 
