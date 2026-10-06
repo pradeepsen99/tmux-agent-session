@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +62,18 @@ def format_duration(seconds: int | None) -> str:
     if sec or not parts:
         parts.append(f"{sec}s")
     return " ".join(parts)
+
+
+def format_age(ts: float | None, now: float | None = None) -> str | None:
+    if ts is None:
+        return None
+    seconds = max(0, int((time.time() if now is None else now) - ts))
+    if seconds < 60:
+        return "just now"
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return f"{seconds // size}{unit} ago"
+    return None
 
 
 def truncate(text: str | None, width: int) -> str:
@@ -170,6 +184,13 @@ def display_model(rec: SessionRecord) -> str | None:
         return model
     provider = first_metadata_value(rec, ("model_provider",))
     return provider
+
+
+def short_model(model: str | None) -> str | None:
+    """Compact model name for list rows; the tool name is already shown alongside."""
+    if not model:
+        return model
+    return re.sub(r"-\d{8}$", "", model.removeprefix("claude-"))
 
 
 STATUS_STYLES = {

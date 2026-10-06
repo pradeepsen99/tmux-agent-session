@@ -4,6 +4,7 @@ import asyncio
 import textwrap
 from functools import partial
 from collections.abc import Callable
+from pathlib import Path
 
 from rich.table import Table
 from rich.text import Text
@@ -18,10 +19,13 @@ from .formatting import (
     display_cwd,
     display_model,
     first_metadata_value,
+    STATUS_STYLES,
+    format_age,
     format_duration,
     format_ts,
     group_records_by_directory,
     picker_metadata_items,
+    short_model,
     status_text,
 )
 from .models import SessionRecord
@@ -31,6 +35,7 @@ from .tmux import focus_tmux_pane, tmux_target
 
 
 PICKER_COLUMNS = ("Directory", "Status", "Tool", "Target", "Model")
+AGE_REFRESH_SECONDS = 30
 
 
 def move_selection(current: int | None, selectable: list[int], step: int) -> int | None:
@@ -89,23 +94,35 @@ def append_detail(lines: list[str], label: str, value: str | None, width: int) -
             lines.append(" " * len(prefix) + chunk)
 
 
+def display_path(path: Path) -> str:
+    home = Path.home()
+    try:
+        return str(Path("~") / path.relative_to(home))
+    except ValueError:
+        return str(path)
+
+
 def picker_detail_items(rec: SessionRecord) -> list[tuple[str, str]]:
     role = first_metadata_value(rec, ("last_message_role",))
     last_message_label = f"Last message ({role})" if role else "Last message"
-    branch_label = "Git branch (recorded)" if rec.metadata.get("recorded_branch") and not rec.metadata.get("git_branch") else "Git branch"
-    items = [
-        ("Title", first_metadata_value(rec, ("title",)) or "Unavailable"),
-        ("Project", first_metadata_value(rec, ("project",)) or display_cwd(rec) or "Unavailable"),
-        (branch_label, first_metadata_value(rec, ("git_branch", "recorded_branch")) or "Unavailable"),
-        ("Last user prompt", first_metadata_value(rec, ("last_user_prompt",)) or "Unavailable"),
-        (last_message_label, first_metadata_value(rec, ("last_message",)) or "Unavailable"),
+    branch = first_metadata_value(rec, ("git_branch",))
+    if branch is None:
+        recorded = first_metadata_value(rec, ("recorded_branch",))
+        branch = f"{recorded} (recorded)" if recorded else None
+    project = first_metadata_value(rec, ("project",))
+    cwd = display_cwd(rec)
+    candidates = [
+        ("Title", first_metadata_value(rec, ("title",))),
+        ("Last user prompt", first_metadata_value(rec, ("last_user_prompt",))),
+        (last_message_label, first_metadata_value(rec, ("last_message",))),
+        ("Git branch", branch),
+        ("Project", project),
+        ("CWD", cwd if cwd != project else None),
         ("Session", rec.session_id),
     ]
+    items = [(label, value) for label, value in candidates if value]
     if rec.requires_user_feedback:
         items.append(("Feedback", "requires user feedback"))
-    cwd = display_cwd(rec)
-    if cwd:
-        items.append(("CWD", cwd))
 
     if rec.tmux_pane is not None:
         tmux_bits = [tmux_target(rec)]
@@ -128,7 +145,7 @@ def picker_detail_items(rec: SessionRecord) -> list[tuple[str, str]]:
     if rec.last_write is not None:
         file_bits.append(format_ts(rec.last_write))
     if rec.path is not None:
-        file_bits.append(str(rec.path))
+        file_bits.append(display_path(rec.path))
     if file_bits:
         items.append(("File", " | ".join(file_bits)))
 
@@ -148,7 +165,7 @@ def build_picker_details(
     return lines
 
 
-def session_option(rec: SessionRecord, selected: bool = False) -> Table:
+def session_option(rec: SessionRecord, selected: bool = False, now: float | None = None) -> Table:
     title = first_metadata_value(rec, ("title", "summary", "last_user_prompt"))
     title = " ".join((title or f"{rec.tool} session").split())
     row = Table.grid(expand=True, padding=(0, 1))
@@ -159,26 +176,59 @@ def session_option(rec: SessionRecord, selected: bool = False) -> Table:
     name.append(f"{marker} ", style=status_text(rec.status).style)
     name.append(title, style="bold" if selected else "")
     row.add_row(name, status_text(rec.status))
-    metadata = " · ".join(filter(None, (rec.tool, tmux_target(rec), display_model(rec))))
-    row.add_row(Text(f"    {metadata}", style="#8fb3ca", no_wrap=True, overflow="ellipsis"), Text(""))
+    metadata = " · ".join(filter(None, (rec.tool, tmux_target(rec), short_model(display_model(rec)))))
+    row.add_row(
+        Text(f"    {metadata}", style="#8fb3ca", no_wrap=True, overflow="ellipsis"),
+        Text(format_age(rec.last_write, now) or "", style="#8fb3ca"),
+    )
     return row
 
 
-def picker_details_renderable(rec: SessionRecord) -> Table:
+DETAIL_LABEL_STYLE = "#65d9ef"
+CONVERSATION_LABELS = ("Last user prompt", "Last message")
+# Facts render as a compact label/value grid; anything unlisted sits between
+# Process and Session, keeping identifiers and file paths at the bottom.
+FACT_ORDER = {"Git branch": 0, "Model": 1, "Project": 2, "CWD": 3, "Tmux": 4, "Process": 5, "Session": 8, "File": 9}
+
+
+def picker_details_renderable(rec: SessionRecord, now: float | None = None) -> Table:
     table = Table.grid(padding=(0, 0))
     table.expand = True
     table.add_column(ratio=1, overflow="fold")
-    items = picker_detail_items(rec)
     title = first_metadata_value(rec, ("title", "summary")) or f"{rec.tool} session"
     table.add_row(Text(title, style="bold"))
-    table.add_row(status_text(rec.status))
-    items.sort(key=lambda item: 0 if item[0] == "Model" else 1)
+
+    status = status_text(rec.status)
+    age = format_age(rec.last_write, now)
+    if age:
+        status.append(f"  ·  {age}", style="#8fb3ca")
+    if rec.requires_user_feedback:
+        status.append("  ·  needs your input", style=STATUS_STYLES["waiting"])
+    table.add_row(status)
+
+    items = picker_detail_items(rec)
     for label, value in items:
-        if label == "Title":
-            continue
+        if label.startswith(CONVERSATION_LABELS):
+            table.add_row(Text(""))
+            table.add_row(Text(label, style=DETAIL_LABEL_STYLE))
+            table.add_row(Text(value))
+
+    facts = [
+        (label, value)
+        for label, value in items
+        if not label.startswith(CONVERSATION_LABELS)
+        and label not in {"Title", "Feedback"}
+        and not (label == "Summary" and value == title)
+    ]
+    if facts:
+        facts.sort(key=lambda item: FACT_ORDER.get(item[0], 6))
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style=DETAIL_LABEL_STYLE, no_wrap=True)
+        grid.add_column(ratio=1, overflow="fold")
+        for label, value in facts:
+            grid.add_row(Text(label), Text(value))
         table.add_row(Text(""))
-        table.add_row(Text(label, style="#65d9ef"))
-        table.add_row(Text(value))
+        table.add_row(grid)
     return table
 
 
@@ -196,7 +246,7 @@ class SessionPickerApp(App[int]):
     #heading { height: 1; text-style: bold; color: #65d9ef; }
     #summary { height: 2; color: #8fb3ca; }
     #body { height: 1fr; layout: horizontal; border-top: solid #24475c; }
-    #session-list { width: 2fr; height: 100%; padding: 1 1 0 0; }
+    #session-list { width: 3fr; height: 100%; padding: 1 1 0 0; }
     #list-heading { height: 2; color: #8fb3ca; padding-left: 4; }
     #sessions { width: 100%; height: 1fr; border: none; padding: 0; background: transparent; }
     #sessions:focus { border: none; background-tint: transparent; }
@@ -204,7 +254,7 @@ class SessionPickerApp(App[int]):
     #sessions > .option-list--option-disabled { color: #65d9ef; text-style: none; }
     #sessions > .option-list--option-highlighted { background: #102d42; color: #eef8ff; text-style: none; }
     #sessions > .option-list--option-hover { background: #0b2233; }
-    #sidebar { width: 3fr; min-width: 32; height: 100%; border-left: solid #24475c; padding: 1 2; }
+    #sidebar { width: 2fr; min-width: 36; height: 100%; border-left: solid #24475c; padding: 1 2; }
     #detail-heading { height: 2; color: #8fb3ca; }
     #details { height: auto; }
     #sessions, #sidebar {
@@ -281,8 +331,19 @@ class SessionPickerApp(App[int]):
         self.title = "Agent sessions"
         self.apply_responsive_layout(self.size.width)
         self.replace_records(self.records)
+        self.set_interval(AGE_REFRESH_SECONDS, self.refresh_ages)
         if self.records_callback is not None:
             self.action_refresh_records()
+
+    def refresh_ages(self) -> None:
+        """Re-render rows so relative ages keep advancing between data refreshes."""
+        sessions = self.query_one("#sessions", OptionList)
+        for index, rec in enumerate(self.records):
+            option_id = str(index)
+            sessions.replace_option_prompt(option_id, session_option(rec, option_id == self.selected_option_id))
+        rec = self.selected_record()
+        if rec is not None:
+            self.query_one("#details", Static).update(picker_details_renderable(rec))
 
     def replace_records(self, records: list[SessionRecord]) -> None:
         previous = self.selected_record()

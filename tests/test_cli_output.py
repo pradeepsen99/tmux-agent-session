@@ -175,3 +175,54 @@ def test_print_table_groups_directories_and_renders_labels_literally() -> None:
     assert "[red]alpha" in output
     assert output.count("zeta") == 1
     assert output.index("row-1") < output.index("row-0") < output.index("row-2")
+
+
+def render_details(rec: cli.SessionRecord, now: float | None = None) -> str:
+    from rich.console import Console
+    console = Console(width=100)
+    with console.capture() as capture:
+        console.print(cli.picker_details_renderable(rec, now=now))
+    return capture.get()
+
+
+def test_details_hide_missing_fields_and_duplicate_cwd() -> None:
+    rec = make_record()
+    out = render_details(rec)
+    assert "Unavailable" not in out
+    assert "Last user prompt" not in out
+
+    rec.metadata["project"] = "project"
+    items = dict(cli.picker_detail_items(rec))
+    assert items["Project"] == "project"
+    assert "CWD" not in items
+
+
+def test_details_lead_with_conversation_and_show_age() -> None:
+    rec = make_record()
+    rec.last_write = 1000
+    rec.requires_user_feedback = True
+    rec.metadata.update({"last_user_prompt": "Please fix parsing", "git_branch": "main"})
+    out = render_details(rec, now=1000 + 4 * 60)
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    assert lines[1] == "active  ·  4m ago  ·  needs your input"
+    assert lines.index("Last user prompt") < next(i for i, line in enumerate(lines) if line.startswith("Git branch"))
+    assert any(line.startswith("Git branch") and line.endswith("main") for line in lines)
+
+
+def test_recorded_branch_is_marked_in_value() -> None:
+    rec = make_record()
+    rec.metadata["recorded_branch"] = "feature"
+    assert dict(cli.picker_detail_items(rec))["Git branch"] == "feature (recorded)"
+
+
+def test_format_age_and_short_model() -> None:
+    from tmux_agent_session.formatting import format_age, short_model
+
+    assert format_age(None) is None
+    assert format_age(100, now=130) == "just now"
+    assert format_age(0, now=5 * 60) == "5m ago"
+    assert format_age(0, now=3 * 3600 + 59) == "3h ago"
+    assert format_age(0, now=2 * 86400) == "2d ago"
+    assert short_model("claude-opus-5-5") == "opus-5-5"
+    assert short_model("claude-sonnet-4-5-20250929") == "sonnet-4-5"
+    assert short_model("gpt-5") == "gpt-5"

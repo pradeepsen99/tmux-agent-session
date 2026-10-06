@@ -104,7 +104,7 @@ def test_textual_picker_caches_details_and_uses_responsive_layout() -> None:
     asyncio.run(scenario())
 
 
-def test_textual_picker_expands_details_panel_on_wide_layout() -> None:
+def test_textual_picker_favors_session_list_on_wide_layout() -> None:
     async def scenario() -> None:
         app = cli.SessionPickerApp(
             [make_record("abc")],
@@ -117,7 +117,7 @@ def test_textual_picker_expands_details_panel_on_wide_layout() -> None:
             sessions = app.query_one("#session-list")
             sidebar = app.query_one("#sidebar")
             assert sidebar.region.x == sessions.region.x + sessions.region.width
-            assert sidebar.region.width > sessions.region.width
+            assert sessions.region.width > sidebar.region.width
             await pilot.resize_terminal(60, 24)
             await pilot.pause()
             assert app.query_one("#body").has_class("narrow")
