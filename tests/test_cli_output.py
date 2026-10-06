@@ -115,21 +115,20 @@ def test_build_picker_details_includes_conversation_metadata() -> None:
     rec = make_record()
     rec.metadata.update({
         "title": "Fix parser", "project": "My project", "git_branch": "fix/parser",
-        "last_user_prompt": "Please fix parsing", "last_message": "Fixed it",
-        "last_message_role": "assistant",
+        "original_prompt": "Please fix parsing", "last_agent_message": "Fixed it",
     })
     joined = "\n".join(cli.build_picker_details(rec, 80))
     assert "Title: Fix parser" in joined
     assert "Project: My project" in joined
     assert "Git branch: fix/parser" in joined
-    assert "Last user prompt: Please fix parsing" in joined
-    assert "Last message (assistant): Fixed it" in joined
+    assert "Original prompt: Please fix parsing" in joined
+    assert "Last agent message: Fixed it" in joined
 
 
 def test_details_render_message_markup_literally() -> None:
     from rich.console import Console
     rec = make_record()
-    rec.metadata["last_message"] = "[red]literal[/red]\nsecond line"
+    rec.metadata["last_agent_message"] = "[red]literal[/red]\nsecond line"
     console = Console(width=120)
     with console.capture() as capture:
         console.print(cli.picker_details_renderable(rec))
@@ -201,11 +200,14 @@ def test_details_lead_with_conversation_and_show_age() -> None:
     rec = make_record()
     rec.last_write = 1000
     rec.requires_user_feedback = True
-    rec.metadata.update({"last_user_prompt": "Please fix parsing", "git_branch": "main"})
+    rec.metadata.update({
+        "original_prompt": "Please fix parsing", "last_agent_message": "Fixed it", "git_branch": "main",
+    })
     out = render_details(rec, now=1000 + 4 * 60)
     lines = [line.strip() for line in out.splitlines() if line.strip()]
     assert lines[1] == "active  ·  4m ago  ·  needs your input"
-    assert lines.index("Last user prompt") < next(i for i, line in enumerate(lines) if line.startswith("Git branch"))
+    assert lines.index("Original prompt") < lines.index("Last agent message")
+    assert lines.index("Last agent message") < next(i for i, line in enumerate(lines) if line.startswith("Git branch"))
     assert any(line.startswith("Git branch") and line.endswith("main") for line in lines)
 
 

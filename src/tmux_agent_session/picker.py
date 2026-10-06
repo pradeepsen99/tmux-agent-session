@@ -19,6 +19,7 @@ from .formatting import (
     display_cwd,
     display_model,
     first_metadata_value,
+    PALETTE,
     STATUS_STYLES,
     format_age,
     format_duration,
@@ -36,6 +37,8 @@ from .tmux import focus_tmux_pane, tmux_target
 
 PICKER_COLUMNS = ("Directory", "Status", "Tool", "Target", "Model")
 AGE_REFRESH_SECONDS = 30
+ACCENT = PALETTE["accent"]
+MUTED = PALETTE["muted"]
 
 
 def move_selection(current: int | None, selectable: list[int], step: int) -> int | None:
@@ -103,8 +106,6 @@ def display_path(path: Path) -> str:
 
 
 def picker_detail_items(rec: SessionRecord) -> list[tuple[str, str]]:
-    role = first_metadata_value(rec, ("last_message_role",))
-    last_message_label = f"Last message ({role})" if role else "Last message"
     branch = first_metadata_value(rec, ("git_branch",))
     if branch is None:
         recorded = first_metadata_value(rec, ("recorded_branch",))
@@ -113,8 +114,8 @@ def picker_detail_items(rec: SessionRecord) -> list[tuple[str, str]]:
     cwd = display_cwd(rec)
     candidates = [
         ("Title", first_metadata_value(rec, ("title",))),
-        ("Last user prompt", first_metadata_value(rec, ("last_user_prompt",))),
-        (last_message_label, first_metadata_value(rec, ("last_message",))),
+        ("Original prompt", first_metadata_value(rec, ("original_prompt",))),
+        ("Last agent message", first_metadata_value(rec, ("last_agent_message",))),
         ("Git branch", branch),
         ("Project", project),
         ("CWD", cwd if cwd != project else None),
@@ -166,26 +167,26 @@ def build_picker_details(
 
 
 def session_option(rec: SessionRecord, selected: bool = False, now: float | None = None) -> Table:
-    title = first_metadata_value(rec, ("title", "summary", "last_user_prompt"))
+    title = first_metadata_value(rec, ("title", "summary", "original_prompt"))
     title = " ".join((title or f"{rec.tool} session").split())
     row = Table.grid(expand=True, padding=(0, 1))
     row.add_column(ratio=1, overflow="ellipsis", no_wrap=True)
     row.add_column(justify="right", no_wrap=True)
-    name = Text("› " if selected else "  ", style="bold #65d9ef" if selected else "")
+    name = Text("› " if selected else "  ", style=f"bold {ACCENT}" if selected else "")
     marker = "●" if rec.status in {"active", "waiting"} else "○"
     name.append(f"{marker} ", style=status_text(rec.status).style)
-    name.append(title, style="bold" if selected else "")
+    name.append(title, style=f"bold {ACCENT}" if selected else "")
     row.add_row(name, status_text(rec.status))
     metadata = " · ".join(filter(None, (rec.tool, tmux_target(rec), short_model(display_model(rec)))))
     row.add_row(
-        Text(f"    {metadata}", style="#8fb3ca", no_wrap=True, overflow="ellipsis"),
-        Text(format_age(rec.last_write, now) or "", style="#8fb3ca"),
+        Text(f"    {metadata}", style=MUTED, no_wrap=True, overflow="ellipsis"),
+        Text(format_age(rec.last_write, now) or "", style=MUTED),
     )
     return row
 
 
-DETAIL_LABEL_STYLE = "#65d9ef"
-CONVERSATION_LABELS = ("Last user prompt", "Last message")
+DETAIL_LABEL_STYLE = ACCENT
+CONVERSATION_LABELS = ("Original prompt", "Last agent message")
 # Facts render as a compact label/value grid; anything unlisted sits between
 # Process and Session, keeping identifiers and file paths at the bottom.
 FACT_ORDER = {"Git branch": 0, "Model": 1, "Project": 2, "CWD": 3, "Tmux": 4, "Process": 5, "Session": 8, "File": 9}
@@ -201,7 +202,7 @@ def picker_details_renderable(rec: SessionRecord, now: float | None = None) -> T
     status = status_text(rec.status)
     age = format_age(rec.last_write, now)
     if age:
-        status.append(f"  ·  {age}", style="#8fb3ca")
+        status.append(f"  ·  {age}", style=MUTED)
     if rec.requires_user_feedback:
         status.append("  ·  needs your input", style=STATUS_STYLES["waiting"])
     table.add_row(status)
@@ -240,38 +241,53 @@ def detail_key(rec: SessionRecord) -> tuple:
     return session_identity(rec) + (rec.last_write, fingerprint(rec.path) if rec.path else None)
 
 
+def summary_text(records: list[SessionRecord]) -> Text:
+    summary = Text(f"All {len(records)}", style="bold")
+    for label, status in (("Needs you", "waiting"), ("Working", "active"),
+                          ("Recent", "recent"), ("Inactive", "stale")):
+        count = sum(rec.status == status for rec in records)
+        summary.append("   ")
+        summary.append(f"{label} {count}", style=STATUS_STYLES[status])
+    return summary
+
+
+def palette_css_variables() -> str:
+    """Expose PALETTE to Textual CSS, whose ANSI color names carry an `ansi_` prefix."""
+    return "".join(f"${'picker_' + name}: ansi_{color};\n" for name, color in PALETTE.items())
+
+
 class SessionPickerApp(App[int]):
-    CSS = """
+    CSS = palette_css_variables() + """
     Screen { layout: vertical; background: ansi_default; color: ansi_default; padding: 1 2; }
-    #heading { height: 1; text-style: bold; color: #65d9ef; }
-    #summary { height: 2; color: #8fb3ca; }
-    #body { height: 1fr; layout: horizontal; border-top: solid #24475c; }
+    #heading { height: 1; text-style: bold; color: $picker_accent; }
+    #summary { height: 2; color: $picker_muted; }
+    #body { height: 1fr; layout: horizontal; border-top: solid $picker_border; }
     #session-list { width: 3fr; height: 100%; padding: 1 1 0 0; }
-    #list-heading { height: 2; color: #8fb3ca; padding-left: 4; }
-    #sessions { width: 100%; height: 1fr; border: none; padding: 0; background: transparent; }
+    #list-heading { height: 2; color: $picker_muted; padding-left: 4; }
+    #sessions { width: 100%; height: 1fr; border: none; padding: 0; background: transparent; color: ansi_default; }
     #sessions:focus { border: none; background-tint: transparent; }
     #sessions > .option-list--option { padding: 0; }
-    #sessions > .option-list--option-disabled { color: #65d9ef; text-style: none; }
-    #sessions > .option-list--option-highlighted { background: #102d42; color: #eef8ff; text-style: none; }
-    #sessions > .option-list--option-hover { background: #0b2233; }
-    #sidebar { width: 2fr; min-width: 36; height: 100%; border-left: solid #24475c; padding: 1 2; }
-    #detail-heading { height: 2; color: #8fb3ca; }
+    #sessions > .option-list--option-disabled { color: $picker_accent; text-style: none; }
+    #sessions > .option-list--option-highlighted { background: transparent; color: ansi_default; text-style: none; }
+    #sessions > .option-list--option-hover { background: transparent; }
+    #sidebar { width: 2fr; min-width: 36; height: 100%; border-left: solid $picker_border; padding: 1 2; }
+    #detail-heading { height: 2; color: $picker_muted; }
     #details { height: auto; }
     #sessions, #sidebar {
         scrollbar-size: 1 1;
         scrollbar-background: ansi_default;
         scrollbar-background-hover: ansi_default;
         scrollbar-background-active: ansi_default;
-        scrollbar-color: #24475c;
-        scrollbar-color-hover: #65d9ef;
-        scrollbar-color-active: #65d9ef;
+        scrollbar-color: $picker_border;
+        scrollbar-color-hover: $picker_accent;
+        scrollbar-color-active: $picker_accent;
         scrollbar-corner-color: ansi_default;
     }
-    #message { height: 1; margin-top: 1; color: #8fb3ca; }
-    #keys { height: 1; color: #8fb3ca; }
+    #message { height: 1; margin-top: 1; color: $picker_muted; }
+    #keys { height: 1; color: $picker_muted; }
     #body.narrow { layout: vertical; }
     #session-list.narrow { width: 100%; height: 3fr; }
-    #sidebar.narrow { width: 100%; min-width: 1; height: 2fr; border-left: none; border-top: solid #24475c; }
+    #sidebar.narrow { width: 100%; min-width: 1; height: 2fr; border-left: none; border-top: solid $picker_border; }
     """
 
     BINDINGS = [
@@ -306,14 +322,7 @@ class SessionPickerApp(App[int]):
 
     def compose(self) -> ComposeResult:
         yield Static("Agent sessions  ·  Group: Directory", id="heading")
-        counts = {status: sum(rec.status == status for rec in self.records)
-                  for status in ("waiting", "active", "recent", "stale")}
-        summary = Text(f"All {len(self.records)}", style="bold")
-        for label, status in (("Needs you", "waiting"), ("Working", "active"),
-                              ("Recent", "recent"), ("Inactive", "stale")):
-            summary.append("   ")
-            summary.append(f"{label} {counts[status]}", style=status_text(status).style)
-        yield Static(summary, id="summary")
+        yield Static(summary_text(self.records), id="summary")
         with Container(id="body"):
             with Container(id="session-list"):
                 yield Static("Sessions", id="list-heading")
@@ -323,8 +332,8 @@ class SessionPickerApp(App[int]):
                 yield Static(id="details", markup=False)
         yield Static(id="message")
         yield Static(Text.assemble(
-            ("↑/↓", "#65d9ef"), " move   ", ("j/k", "#65d9ef"), " move   ",
-            ("enter", "#65d9ef"), " focus   ", ("r", "#65d9ef"), " refresh   ", ("q / esc", "#65d9ef"), " quit",
+            ("↑/↓", ACCENT), " move   ", ("j/k", ACCENT), " move   ",
+            ("enter", ACCENT), " focus   ", ("r", ACCENT), " refresh   ", ("q / esc", ACCENT), " quit",
         ), id="keys")
 
     def on_mount(self) -> None:
@@ -353,17 +362,12 @@ class SessionPickerApp(App[int]):
         sessions.clear_options()
         self.directory_groups = group_records_by_directory(records)
         self.records = [rec for _, group in self.directory_groups for rec in group]
-        self.query_one("#summary", Static).update(
-            "   ".join([f"All {len(self.records)}"] + [
-                f"{label} {sum(rec.status == status for rec in self.records)}"
-                for label, status in (("Needs you", "waiting"), ("Working", "active"),
-                                      ("Recent", "recent"), ("Inactive", "stale"))
-            ])
-        )
+        self.query_one("#summary", Static).update(summary_text(self.records))
         index = 0
         for group_index, (directory, group) in enumerate(self.directory_groups):
-            heading = Text(("\n" if group_index else "") + directory, style="bold #65d9ef")
-            heading.append(f"  {len(group)}", style="#8fb3ca")
+            # Color comes from CSS: Textual reads a plain Text prompt's "cyan" as RGB #00ffff.
+            heading = Text(("\n" if group_index else "") + directory, style="bold")
+            heading.append(f"  {len(group)}", style=MUTED)
             sessions.add_option(Option(heading, id=f"directory-{group_index}", disabled=True))
             for rec in group:
                 sessions.add_option(Option(session_option(rec), id=str(index)))

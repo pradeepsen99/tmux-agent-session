@@ -86,7 +86,7 @@ def test_textual_picker_caches_details_and_uses_responsive_layout() -> None:
 
         def details_callback(rec: cli.SessionRecord) -> dict[str, str]:
             loaded.append(rec.session_id)
-            return {"title": "Fix [red]literal[/red]", "last_user_prompt": "Please fix it"}
+            return {"title": "Fix [red]literal[/red]", "original_prompt": "Please fix it"}
 
         record = make_record("abc")
         app = cli.SessionPickerApp([record], details_callback=details_callback)
@@ -95,7 +95,7 @@ def test_textual_picker_caches_details_and_uses_responsive_layout() -> None:
             await pilot.pause()
             assert app.query_one("#body").has_class("narrow")
             assert app.details_cache[detail_key(record)]["title"] == "Fix [red]literal[/red]"
-            assert record.metadata["last_user_prompt"] == "Please fix it"
+            assert record.metadata["original_prompt"] == "Please fix it"
             assert not app.query("#preview")
             app.update_selected_record()
             await pilot.press("q")

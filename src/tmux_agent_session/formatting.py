@@ -193,11 +193,19 @@ def short_model(model: str | None) -> str | None:
     return re.sub(r"-\d{8}$", "", model.removeprefix("claude-"))
 
 
+# Named ANSI colors (not RGB) so the picker inherits the terminal's theme,
+# the way fzf, lazygit, and git do. Values are Rich color names.
+PALETTE = {
+    "accent": "cyan",
+    "muted": "bright_black",
+    "border": "bright_black",
+}
+
 STATUS_STYLES = {
-    "waiting": "bold #f2bf75",
-    "active": "bold #69d6a2",
-    "recent": "#83b8ef",
-    "stale": "#b6a0d9",
+    "waiting": "bold yellow",
+    "active": "bold green",
+    "recent": "blue",
+    "stale": "magenta",
 }
 
 

@@ -5,7 +5,7 @@ import json
 import sqlite3
 import subprocess
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .harnesses.codex import _iter_jsonl_head
 from .models import SessionRecord
@@ -55,6 +55,34 @@ def _reverse_jsonl(path: Path) -> Iterator[dict[str, Any]]:
         return
 
 
+def _forward_jsonl(path: Path) -> Iterator[dict[str, Any]]:
+    """Read oldest entries first, stopping as soon as the caller does."""
+    try:
+        with path.open("rb") as stream:
+            for line in stream:
+                item = _object(line.decode("utf-8", errors="replace"))
+                if item:
+                    yield item
+    except OSError:
+        return
+
+
+def _conversation(
+    path: Path, message: Callable[[dict[str, Any]], tuple[str, str]]
+) -> dict[str, str]:
+    """Find the first user prompt and the agent's most recent reply."""
+    details: dict[str, str] = {}
+    for role, text in map(message, _forward_jsonl(path)):
+        if role == "user" and text:
+            details["original_prompt"] = _excerpt(text)
+            break
+    for role, text in map(message, _reverse_jsonl(path)):
+        if role == "assistant" and text:
+            details["last_agent_message"] = _excerpt(text)
+            break
+    return details
+
+
 def _codex_message(entry: dict[str, Any]) -> tuple[str, str]:
     payload = entry.get("payload")
     if not isinstance(payload, dict):
@@ -101,17 +129,59 @@ def _codex_details(rec: SessionRecord) -> dict[str, str]:
                     details["title"] = _text(entry.get("thread_name"))
                     break
             break
-    for entry in _reverse_jsonl(rec.path):
-        role, text = _codex_message(entry)
-        if not text:
-            continue
-        if "last_message" not in details:
-            details["last_message"] = _excerpt(text)
-            details["last_message_role"] = role
-        if role == "user":
-            details["last_user_prompt"] = _excerpt(text)
-            break
+    details.update(_conversation(rec.path, _codex_message))
     return {key: value for key, value in details.items() if value}
+
+
+CLAUDE_INJECTED_PREFIXES = (
+    "<command-name>", "<command-message>", "<local-command-", "<bash-input>",
+    "<bash-stdout>", "<bash-stderr>", "<task-notification>",
+)
+
+
+def _claude_message(entry: dict[str, Any]) -> tuple[str, str]:
+    # Meta, subagent and compaction entries are not part of the visible conversation.
+    if entry.get("type") not in {"user", "assistant"} or entry.get("isMeta") \
+            or entry.get("isSidechain") or entry.get("isCompactSummary"):
+        return "", ""
+    message = entry.get("message")
+    if not isinstance(message, dict):
+        return "", ""
+    content = message.get("content")
+    if isinstance(content, str):
+        text = content.strip()
+    elif isinstance(content, list):
+        # Tool calls, tool results and thinking blocks carry no prose for the reader.
+        text = "\n".join(
+            _text(part.get("text")) for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ).strip()
+    else:
+        return "", ""
+    role = entry["type"]
+    if role == "user" and text.startswith(CLAUDE_INJECTED_PREFIXES):
+        return "", ""
+    return role, text
+
+
+def _claude_details(rec: SessionRecord) -> dict[str, str]:
+    if rec.path is None:
+        return {}
+    return _conversation(rec.path, _claude_message)
+
+
+def _opencode_text(conn: sqlite3.Connection, message_id: str) -> str:
+    parts = conn.execute(
+        "SELECT data FROM part WHERE message_id = ? ORDER BY time_created, id", (message_id,),
+    )
+    texts = []
+    for row in parts:
+        part = _object(row["data"])
+        if part.get("type") == "text" and not part.get("synthetic") and not part.get("ignored"):
+            text = _text(part.get("text"))
+            if text:
+                texts.append(text)
+    return "\n".join(texts)
 
 
 def _opencode_details(rec: SessionRecord) -> dict[str, str]:
@@ -134,36 +204,18 @@ def _opencode_details(rec: SessionRecord) -> dict[str, str]:
                                 details["project"] = Path(project["worktree"]).name
                     except (sqlite3.Error, TypeError):
                         pass
-            messages = conn.execute(
-                "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created DESC, id DESC",
-                (rec.session_id,),
-            )
-            for message in messages:
-                role = _object(message["data"]).get("role")
-                if role not in {"user", "assistant"}:
-                    continue
-                if role != "user" and "last_message" in details:
-                    continue
-                parts = conn.execute(
-                    "SELECT data FROM part WHERE message_id = ? ORDER BY time_created, id",
-                    (message["id"],),
+            for key, role, order in (("original_prompt", "user", "ASC"), ("last_agent_message", "assistant", "DESC")):
+                messages = conn.execute(
+                    f"SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created {order}, id {order}",
+                    (rec.session_id,),
                 )
-                texts = []
-                for row in parts:
-                    part = _object(row["data"])
-                    if part.get("type") == "text" and not part.get("synthetic") and not part.get("ignored"):
-                        text = _text(part.get("text"))
-                        if text:
-                            texts.append(text)
-                text = "\n".join(texts)
-                if not text:
-                    continue
-                if "last_message" not in details:
-                    details["last_message"] = _excerpt(text)
-                    details["last_message_role"] = role
-                if role == "user":
-                    details["last_user_prompt"] = _excerpt(text)
-                    break
+                for message in messages:
+                    if _object(message["data"]).get("role") != role:
+                        continue
+                    text = _opencode_text(conn, message["id"])
+                    if text:
+                        details[key] = _excerpt(text)
+                        break
         finally:
             conn.close()
     except (OSError, sqlite3.Error):
@@ -183,7 +235,8 @@ def _git(cwd: str, *args: str) -> str:
 
 def load_session_details(rec: SessionRecord) -> dict[str, str]:
     """Load only the selected session; missing storage or Git is harmless."""
-    details = _codex_details(rec) if rec.tool == "codex" else _opencode_details(rec)
+    loader = {"codex": _codex_details, "claude": _claude_details, "opencode": _opencode_details}.get(rec.tool)
+    details = loader(rec) if loader else {}
     cwd = rec.cwd or (rec.matched_process.cwd if rec.matched_process else None)
     cwd = cwd or (rec.tmux_pane.pane_current_path if rec.tmux_pane else None)
     if cwd:
