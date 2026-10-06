@@ -5,7 +5,7 @@ import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
-from .models import ProcessInfo, SessionRecord
+from .models import BLANK_SESSION_TITLE, ProcessInfo, SessionRecord
 from .session_files import normalize_cwd
 
 
@@ -152,7 +152,7 @@ def add_process_only_records(
             path=None,
             last_write=None,
             cwd=normalize_cwd(proc.cwd),
-            metadata={},
+            metadata={"title": BLANK_SESSION_TITLE},
             matched_process=proc,
             score=80,
             status="active",

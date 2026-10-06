@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Any
 
 
+# Title for sessions that have no transcript or no conversation yet.
+BLANK_SESSION_TITLE = "Blank Session"
+
+
 @dataclass
 class ProcessInfo:
     pid: int

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Iterable
 
-from ..models import SessionCandidates, SessionRecord
+from ..models import BLANK_SESSION_TITLE, SessionCandidates, SessionRecord
 from ..session_files import (
     normalize_cwd,
     safe_mtime,
@@ -15,6 +16,8 @@ from ..session_files import (
 
 DEFAULT_CLAUDE_DIR = Path("~/.claude/projects").expanduser()
 CLAUDE_HEAD_SCAN_LINES = 64
+CLAUDE_TAIL_BLOCK_BYTES = 64 * 1024
+CLAUDE_TAIL_MAX_BYTES = 1024 * 1024
 
 
 def project_dir_name(cwd: str) -> str:
@@ -50,6 +53,47 @@ def _iter_jsonl_head(
         return
 
 
+def _ai_title_from_line(line: bytes) -> str | None:
+    if b'"aiTitle"' not in line:
+        return None
+    try:
+        item = json.loads(line)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    title = item.get("aiTitle") if isinstance(item, dict) else None
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    return None
+
+
+def _latest_ai_title(path: Path) -> str | None:
+    """Return the most recent ``aiTitle`` by reading the transcript backwards.
+
+    Claude re-appends an ``ai-title`` entry throughout a session and the title
+    can change (e.g. after a rename), so the first one in the file goes stale.
+    Reads are bounded to ``CLAUDE_TAIL_MAX_BYTES`` to keep large transcripts cheap.
+    """
+    try:
+        with path.open("rb") as f:
+            pos = f.seek(0, os.SEEK_END)
+            limit = max(0, pos - CLAUDE_TAIL_MAX_BYTES)
+            carry = b""
+            while pos > limit:
+                start = max(limit, pos - CLAUDE_TAIL_BLOCK_BYTES)
+                f.seek(start)
+                lines = (f.read(pos - start) + carry).split(b"\n")
+                pos = start
+                # The first piece may be a partial line; finish it on the next block.
+                carry = lines.pop(0) if pos > 0 else b""
+                for line in reversed(lines):
+                    title = _ai_title_from_line(line)
+                    if title is not None:
+                        return title
+    except OSError:
+        return None
+    return None
+
+
 def extract_claude_session(
     path: Path, candidates: SessionCandidates | None = None
 ) -> SessionRecord | None:
@@ -82,6 +126,12 @@ def extract_claude_session(
 
     if session_id is None and cwd is None:
         return None
+
+    latest_title = _latest_ai_title(path)
+    if latest_title is not None:
+        metadata["title"] = latest_title
+    # Claude writes an ai-title once a real prompt arrives, so none means blank.
+    metadata.setdefault("title", BLANK_SESSION_TITLE)
 
     rec = SessionRecord(
         tool="claude",

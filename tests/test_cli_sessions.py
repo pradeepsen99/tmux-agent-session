@@ -609,6 +609,70 @@ def test_extract_claude_session_reads_metadata(tmp_path: Path) -> None:
     assert rec.metadata["gitBranch"] == "feature/x"
 
 
+def _append_jsonl(path: Path, entries: list[dict]) -> None:
+    with path.open("a", encoding="utf-8") as f:
+        for entry in entries:
+            f.write(json.dumps(entry) + "\n")
+
+
+def test_extract_claude_session_prefers_latest_ai_title(tmp_path: Path) -> None:
+    cwd = str((tmp_path / "repo").resolve())
+    session_id = "558557db-f4d3-46fe-901d-470c3ef7ad77"
+    path = _write_claude_transcript(
+        tmp_path / "projects", cwd, session_id, title="Original title"
+    )
+    _append_jsonl(
+        path,
+        [{"type": "user", "sessionId": session_id, "message": {"content": "x" * 200}}]
+        * 100
+        + [{"type": "ai-title", "aiTitle": "renamed-title", "sessionId": session_id}]
+        + [{"type": "user", "sessionId": session_id}] * 5,
+    )
+
+    rec = claude.extract_claude_session(path)
+
+    assert rec is not None
+    assert rec.metadata["title"] == "renamed-title"
+
+
+def test_extract_claude_session_without_title_is_blank(tmp_path: Path) -> None:
+    cwd = str((tmp_path / "repo").resolve())
+    session_id = "558557db-f4d3-46fe-901d-470c3ef7ad77"
+    project = tmp_path / "projects" / claude.project_dir_name(cwd)
+    project.mkdir(parents=True)
+    path = project / f"{session_id}.jsonl"
+    _append_jsonl(path, [{"type": "user", "sessionId": session_id, "cwd": cwd}])
+
+    rec = claude.extract_claude_session(path)
+
+    assert rec is not None
+    assert rec.metadata["title"] == "Blank Session"
+
+
+def test_extract_claude_session_finds_title_past_head_window(
+    tmp_path: Path, monkeypatch
+) -> None:
+    cwd = str((tmp_path / "repo").resolve())
+    session_id = "558557db-f4d3-46fe-901d-470c3ef7ad77"
+    project = tmp_path / "projects" / claude.project_dir_name(cwd)
+    project.mkdir(parents=True)
+    path = project / f"{session_id}.jsonl"
+    filler = {"type": "user", "sessionId": session_id, "cwd": cwd, "message": {"content": "y" * 300}}
+    _append_jsonl(
+        path,
+        [filler] * (claude.CLAUDE_HEAD_SCAN_LINES + 10)
+        + [{"type": "ai-title", "aiTitle": "Late title", "sessionId": session_id}]
+        + [filler] * 20,
+    )
+    # Force several backwards reads so lines straddle block boundaries.
+    monkeypatch.setattr(claude, "CLAUDE_TAIL_BLOCK_BYTES", 1000)
+
+    rec = claude.extract_claude_session(path)
+
+    assert rec is not None
+    assert rec.metadata["title"] == "Late title"
+
+
 def test_claude_load_sessions_resolves_project_by_cwd(tmp_path: Path) -> None:
     base = tmp_path / "projects"
     cwd = str((tmp_path / "ML_ENG" / "app").resolve())

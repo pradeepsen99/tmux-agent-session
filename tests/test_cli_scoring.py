@@ -167,6 +167,7 @@ def test_add_process_only_records_adds_only_unmatched_processes() -> None:
     assert extra.status == "active"
     assert extra.score == 90
     assert "running process without a matching session file" in extra.reasons
+    assert extra.metadata["title"] == "Blank Session"
 
 
 def test_attach_tmux_panes_matches_process_tty() -> None:
