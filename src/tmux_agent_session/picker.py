@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import textwrap
+from functools import partial
 from collections.abc import Callable
 
 from rich.table import Table
@@ -24,6 +25,7 @@ from .formatting import (
     status_text,
 )
 from .models import SessionRecord
+from .session_cache import fingerprint
 from .session_details import load_session_details
 from .tmux import focus_tmux_pane, tmux_target
 
@@ -180,6 +182,14 @@ def picker_details_renderable(rec: SessionRecord) -> Table:
     return table
 
 
+def session_identity(rec: SessionRecord) -> tuple:
+    return rec.tool, rec.session_id, str(rec.path)
+
+
+def detail_key(rec: SessionRecord) -> tuple:
+    return session_identity(rec) + (rec.last_write, fingerprint(rec.path) if rec.path else None)
+
+
 class SessionPickerApp(App[int]):
     CSS = """
     Screen { layout: vertical; background: ansi_default; color: ansi_default; padding: 1 2; }
@@ -218,6 +228,7 @@ class SessionPickerApp(App[int]):
         Binding("enter", "focus_selected", "Focus", priority=True),
         Binding("q", "cancel", "Quit", priority=True),
         Binding("escape", "cancel", "Quit", show=False, priority=True),
+        Binding("r", "refresh_records", "Refresh"),
         Binding("j", "cursor_down", "Down"),
         Binding("k", "cursor_up", "Up"),
     ]
@@ -227,6 +238,7 @@ class SessionPickerApp(App[int]):
         records: list[SessionRecord],
         *,
         focus_callback: Callable[[SessionRecord], bool] = focus_tmux_pane,
+        records_callback: Callable[[], list[SessionRecord]] | None = None,
         details_callback: Callable[[SessionRecord], dict[str, str]] = load_session_details,
     ) -> None:
         super().__init__(ansi_color=True)
@@ -234,9 +246,13 @@ class SessionPickerApp(App[int]):
         self.records = [rec for _, group in self.directory_groups for rec in group]
         self.focus_callback = focus_callback
         self.details_callback = details_callback
+        self.records_callback = records_callback
+        self.load_generation = 0
+        self.loading = False
+        self.snapshot_valid = True
         self.selected_option_id: str | None = None
-        self.details_cache: dict[int, dict[str, str]] = {}
-        self.details_pending: set[int] = set()
+        self.details_cache: dict[tuple, dict[str, str]] = {}
+        self.details_pending: set[tuple] = set()
 
     def compose(self) -> ComposeResult:
         yield Static("Agent sessions  ·  Group: Directory", id="heading")
@@ -258,13 +274,31 @@ class SessionPickerApp(App[int]):
         yield Static(id="message")
         yield Static(Text.assemble(
             ("↑/↓", "#65d9ef"), " move   ", ("j/k", "#65d9ef"), " move   ",
-            ("enter", "#65d9ef"), " focus   ", ("q / esc", "#65d9ef"), " quit",
+            ("enter", "#65d9ef"), " focus   ", ("r", "#65d9ef"), " refresh   ", ("q / esc", "#65d9ef"), " quit",
         ), id="keys")
 
     def on_mount(self) -> None:
         self.title = "Agent sessions"
         self.apply_responsive_layout(self.size.width)
+        self.replace_records(self.records)
+        if self.records_callback is not None:
+            self.action_refresh_records()
+
+    def replace_records(self, records: list[SessionRecord]) -> None:
+        previous = self.selected_record()
+        identity = session_identity(previous) if previous else None
         sessions = self.query_one("#sessions", OptionList)
+        self.selected_option_id = None
+        sessions.clear_options()
+        self.directory_groups = group_records_by_directory(records)
+        self.records = [rec for _, group in self.directory_groups for rec in group]
+        self.query_one("#summary", Static).update(
+            "   ".join([f"All {len(self.records)}"] + [
+                f"{label} {sum(rec.status == status for rec in self.records)}"
+                for label, status in (("Needs you", "waiting"), ("Working", "active"),
+                                      ("Recent", "recent"), ("Inactive", "stale"))
+            ])
+        )
         index = 0
         for group_index, (directory, group) in enumerate(self.directory_groups):
             heading = Text(("\n" if group_index else "") + directory, style="bold #65d9ef")
@@ -274,7 +308,7 @@ class SessionPickerApp(App[int]):
                 sessions.add_option(Option(session_option(rec), id=str(index)))
                 index += 1
 
-        initial_index = first_focusable_index(self.records)
+        initial_index = next((i for i, rec in enumerate(self.records) if session_identity(rec) == identity), first_focusable_index(self.records))
         if initial_index is None:
             self.update_message("No sessions available. Press q to exit.")
             self.update_details(None)
@@ -282,6 +316,29 @@ class SessionPickerApp(App[int]):
         sessions.highlighted = sessions.get_option_index(str(initial_index))
         sessions.focus()
         self.update_selected_record()
+
+    def action_refresh_records(self) -> None:
+        if self.records_callback is None:
+            return
+        self.load_generation += 1
+        self.loading = True
+        self.snapshot_valid = False
+        self.update_message("Refreshing sessions…" if self.records else "Loading sessions…")
+        self.run_worker(partial(self.fetch_records, self.load_generation), group="session-loading", exclusive=True)
+
+    async def fetch_records(self, generation: int) -> None:
+        try:
+            records = await asyncio.to_thread(self.records_callback)
+        except Exception:
+            if generation == self.load_generation:
+                self.loading = False
+                self.update_message("Could not refresh sessions. Press r to retry.")
+            return
+        if generation != self.load_generation:
+            return
+        self.loading = False
+        self.snapshot_valid = True
+        self.replace_records(records)
 
     def on_resize(self, event: Resize) -> None:
         self.apply_responsive_layout(event.size.width)
@@ -299,7 +356,8 @@ class SessionPickerApp(App[int]):
         option = self.query_one("#sessions", OptionList).highlighted_option
         if option is None or option.disabled or option.id is None:
             return None
-        return self.records[int(option.id)]
+        index = int(option.id)
+        return self.records[index] if index < len(self.records) else None
 
     def on_option_list_option_highlighted(self, _event: OptionList.OptionHighlighted) -> None:
         self.update_selected_record()
@@ -317,6 +375,9 @@ class SessionPickerApp(App[int]):
         self.exit(1)
 
     def action_focus_selected(self) -> None:
+        if not self.snapshot_valid:
+            self.update_message("Refreshing sessions…" if self.loading else "Press r to refresh before focusing.")
+            return
         rec = self.selected_record()
         if rec is None:
             self.update_message("No sessions available. Press q to exit.")
@@ -341,6 +402,12 @@ class SessionPickerApp(App[int]):
             sessions.replace_option_prompt(self.selected_option_id, session_option(self.records[index], True))
         rec = self.selected_record()
         self.update_details(rec)
+        if self.loading:
+            self.update_message("Refreshing sessions…" if self.records else "Loading sessions…")
+            return
+        if not self.snapshot_valid:
+            self.update_message("Could not refresh sessions. Press r to retry.")
+            return
         if rec is None:
             self.update_message("No sessions available. Press q to exit.")
             return
@@ -363,24 +430,29 @@ class SessionPickerApp(App[int]):
         if rec is None:
             details.update("No session selected.")
             return
+        key = detail_key(rec)
+        rec.metadata.update(self.details_cache.get(key, {}))
         details.update(picker_details_renderable(rec))
-        key = id(rec)
-        if key not in self.details_cache and key not in self.details_pending:
-            self.details_pending.add(key)
-            self.run_worker(self.fetch_details(rec), group="session-details")
+        pending = (self.load_generation, key)
+        if key not in self.details_cache and pending not in self.details_pending:
+            self.details_pending.add(pending)
+            self.run_worker(partial(self.fetch_details, rec, key, self.load_generation), group="session-details")
 
-    async def fetch_details(self, rec: SessionRecord) -> None:
-        key = id(rec)
+    async def fetch_details(self, rec: SessionRecord, key: tuple, generation: int) -> None:
         try:
             metadata = await asyncio.to_thread(self.details_callback, rec)
         except Exception:
             # Unreadable or changing storage must not close the picker.
             metadata = {}
         finally:
-            self.details_pending.discard(key)
+            self.details_pending.discard((generation, key))
+        if generation != self.load_generation or detail_key(rec) != key:
+            return
         self.details_cache[key] = metadata
         rec.metadata.update(metadata)
-        index = next(index for index, record in enumerate(self.records) if record is rec)
+        index = next((index for index, record in enumerate(self.records) if record is rec), None)
+        if index is None:
+            return
         self.query_one("#sessions", OptionList).replace_option_prompt(
             str(index), session_option(rec, self.selected_record() is rec)
         )
@@ -391,6 +463,6 @@ class SessionPickerApp(App[int]):
         self.query_one("#message", Static).update(message)
 
 
-def run_picker(records: list[SessionRecord]) -> int:
-    result = SessionPickerApp(records).run()
+def run_picker(records: list[SessionRecord], *, records_callback: Callable[[], list[SessionRecord]] | None = None) -> int:
+    result = SessionPickerApp(records, records_callback=records_callback).run()
     return result if result is not None else 1

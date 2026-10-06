@@ -160,3 +160,29 @@ uv run tas --claude-dir ~/.claude/projects
 - Session matching is best-effort and based on process inspection plus session file heuristics.
 - tmux focusing only works for sessions that can be mapped to a tmux pane.
 - cwd detection differs by platform. Linux can use `/proc`, while macOS typically falls back to `lsof`.
+
+## Loading and refresh
+
+Codex transcript metadata is cached in `$XDG_CACHE_HOME/tmux-agent-session/metadata.sqlite3`
+(default `~/.cache/tmux-agent-session/metadata.sqlite3`). Changed files are reparsed;
+processes, tmux panes, scores, and feedback status are checked on each load. The cache
+contains session IDs, paths, and extracted metadata, not conversation text. It is
+rebuildable: delete the database to reset it. Unavailable caches fall back to parsing.
+OpenCode continues to query its own database directly.
+
+Use `uv run tas --no-cache` to bypass the cache. The picker opens while discovery runs
+in the background; press `r` to refresh. Refresh retains the current list and selection
+when possible, but focusing is disabled until a fresh snapshot succeeds.
+
+Run tests and repeatable benchmarks with:
+
+```bash
+uv run pytest
+uv run python -m tmux_agent_session.benchmark --files 1000 --runs 7
+uv run python -m tmux_agent_session.benchmark --live --runs 7
+```
+
+The fixture benchmark uses temporary synthetic transcripts and an isolated cache,
+reporting discovery time, total time, and parsed-file counts. The live benchmark
+reports fresh-process JSON CLI timings with and without the cache; live sessions may
+change during measurement. Neither benchmark clears the operating system's file cache.

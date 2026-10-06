@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from tmux_agent_session import cli
+from tmux_agent_session.picker import detail_key
 
 
 def make_record(session_id: str, *, focusable: bool = True) -> cli.SessionRecord:
@@ -93,7 +94,7 @@ def test_textual_picker_caches_details_and_uses_responsive_layout() -> None:
             await app.workers.wait_for_complete()
             await pilot.pause()
             assert app.query_one("#body").has_class("narrow")
-            assert app.details_cache[id(record)]["title"] == "Fix [red]literal[/red]"
+            assert app.details_cache[detail_key(record)]["title"] == "Fix [red]literal[/red]"
             assert record.metadata["last_user_prompt"] == "Please fix it"
             assert not app.query("#preview")
             app.update_selected_record()
@@ -227,4 +228,76 @@ def test_picker_empty_and_small_layout() -> None:
             await pilot.press("escape")
         assert app.return_value == 1
 
+    asyncio.run(scenario())
+
+
+def test_picker_loads_and_refreshes_in_background() -> None:
+    async def scenario():
+        snapshots = [[make_record("abc"), make_record("def")], [make_record("def")], []]
+        app = cli.SessionPickerApp([], records_callback=lambda: snapshots.pop(0), details_callback=lambda _: {})
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app.selected_record().session_id == "abc"
+            await pilot.press("j")
+            await pilot.press("r")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app.selected_record().session_id == "def"
+            await pilot.press("r")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app.selected_record() is None
+            await pilot.press("q")
+    asyncio.run(scenario())
+
+
+def test_picker_failed_refresh_prevents_stale_focus() -> None:
+    async def scenario():
+        def fail():
+            raise OSError("unavailable")
+        focused = []
+        app = cli.SessionPickerApp([make_record("abc")], records_callback=fail,
+                                  focus_callback=lambda rec: focused.append(rec), details_callback=lambda _: {})
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.press("enter")
+            assert not focused
+            await pilot.press("q")
+    asyncio.run(scenario())
+
+
+def test_picker_can_quit_while_loading() -> None:
+    import threading
+    async def scenario():
+        release = threading.Event()
+        def load():
+            release.wait(5)
+            return [make_record("late")]
+        app = cli.SessionPickerApp([], records_callback=load)
+        try:
+            async with app.run_test() as pilot:
+                assert app.loading
+                await pilot.press("q")
+                assert app.return_value == 1
+        finally:
+            release.set()
+    asyncio.run(scenario())
+
+
+def test_picker_discards_old_snapshot_and_detail_response() -> None:
+    async def scenario():
+        app = cli.SessionPickerApp([make_record("abc")], details_callback=lambda _: {})
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            old = app.selected_record()
+            generation = app.load_generation
+            app.load_generation += 1
+            app.records_callback = lambda: [make_record("outdated")]
+            await app.fetch_records(generation)
+            assert app.selected_record() is old
+            app.details_cache.clear()
+            await app.fetch_details(old, detail_key(old), generation)
+            assert not app.details_cache
+            await pilot.press("q")
     asyncio.run(scenario())

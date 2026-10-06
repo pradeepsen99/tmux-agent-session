@@ -35,3 +35,10 @@ Until tests exist, verify changes with:
 Recent history uses short Conventional Commit prefixes, for example `feat: initial commit` and `feat: it works!`. Continue with concise messages like `fix: handle missing tmux output`.
 
 Pull requests should describe behavior changes, list manual verification steps, and link related issues when applicable. Include terminal output or screenshots when the change affects CLI presentation or curses rendering.
+
+## Current package validation
+
+The implementation now lives under `src/tmux_agent_session/`, with tests under `tests/`.
+Use `uv run pytest` for regression coverage and `uv run tas --help` / `uv run tas --json`
+for CLI smoke checks. Loading benchmarks: `uv run python -m tmux_agent_session.benchmark`
+for isolated fixtures, or append `--live` for local CLI measurements.

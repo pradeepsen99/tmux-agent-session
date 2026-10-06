@@ -410,7 +410,7 @@ def test_main_prints_json(monkeypatch, capsys) -> None:
 
 def test_main_dispatches_to_picker(monkeypatch) -> None:
     monkeypatch.setattr(cli, "build_records", lambda _args: [])
-    monkeypatch.setattr(cli, "run_picker", lambda records: 7 if records == [] else 1)
+    monkeypatch.setattr(cli, "run_picker", lambda records, **kwargs: 7 if records == [] and callable(kwargs["records_callback"]) else 1)
     monkeypatch.setattr(cli.sys, "argv", ["tas", "--pick"])
 
     assert cli.main() == 7

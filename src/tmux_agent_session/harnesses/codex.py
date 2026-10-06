@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
+from ..session_cache import SessionCache, fingerprint
 from ..models import SessionCandidates, SessionRecord
 from ..session_files import (
     normalize_cwd,
@@ -69,7 +70,7 @@ def _iter_jsonl_tail(
             yield item
 
 
-def _extract_codex_payloads(
+def _extract_codex_payloads_fallback(
     path: Path,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     session_meta: dict[str, Any] | None = None
@@ -87,6 +88,21 @@ def _extract_codex_payloads(
                 latest_turn_context = payload
 
     return session_meta, latest_turn_context
+
+
+def _extract_codex_payloads(path: Path) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    session_meta = None
+    latest_context = None
+    for entry in _iter_jsonl_head(path, max_lines=1):
+        if entry.get("type") == "session_meta" and isinstance(entry.get("payload"), dict):
+            session_meta = entry["payload"]
+    if session_meta is not None:
+        for entry in _iter_jsonl_tail(path):
+            if entry.get("type") == "turn_context" and isinstance(entry.get("payload"), dict):
+                latest_context = entry["payload"]
+        if latest_context is not None:
+            return session_meta, latest_context
+    return _extract_codex_payloads_fallback(path)
 
 
 def find_codex_session_files(base: Path) -> list[Path]:
@@ -177,20 +193,30 @@ def load_sessions(
     records: list[SessionRecord] = []
     seen: set[tuple[str, str]] = set()
 
-    for base in base_paths:
-        for path in find_codex_session_files(base):
-            rec = extract_codex_session(path, candidates)
-            record_candidates = [rec] if rec is not None else []
-            if not record_candidates:
-                continue
-            for rec in record_candidates:
-                key = (rec.tool, rec.session_id)
-                if key in seen:
+    cache = SessionCache()
+    try:
+        for base in base_paths:
+            for path in find_codex_session_files(base):
+                stamp = fingerprint(path)
+                hit, rec = cache.read(path, stamp)
+                if not hit:
+                    rec = extract_codex_session(path)
+                    cache.write(path, stamp, rec)
+                if rec is not None and not session_matches_candidates(rec, candidates):
+                    rec = None
+                record_candidates = [rec] if rec is not None else []
+                if not record_candidates:
                     continue
-                seen.add(key)
-                records.append(rec)
+                for rec in record_candidates:
+                    key = (rec.tool, rec.session_id)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    records.append(rec)
+                if _records_satisfy_candidates(records, candidates):
+                    break
             if _records_satisfy_candidates(records, candidates):
                 break
-        if _records_satisfy_candidates(records, candidates):
-            break
+    finally:
+        cache.close()
     return records

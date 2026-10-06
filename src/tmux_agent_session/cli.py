@@ -130,8 +130,8 @@ def rich_picker_row_cells(*args, **kwargs):
     return _picker_attr("rich_picker_row_cells")(*args, **kwargs)
 
 
-def run_picker(records: list[SessionRecord]) -> int:
-    return _picker_attr("run_picker")(records)
+def run_picker(records: list[SessionRecord], **kwargs) -> int:
+    return _picker_attr("run_picker")(records, **kwargs)
 
 
 def load_sessions(
@@ -196,82 +196,14 @@ def session_candidates_for_tool(
 
 
 def build_records(args: argparse.Namespace) -> list[SessionRecord]:
-    opencode_dirs = args.opencode_dir or DEFAULT_OPENCODE_DIRS
+    from .loader import build_records as discover
+    from .session_cache import CACHE_ENABLED
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        processes_future = executor.submit(detect_processes)
-        panes_future = executor.submit(detect_tmux_panes)
-        processes = processes_future.result()
-        panes = panes_future.result()
-
-    if args.tool != "all":
-        processes = [proc for proc in processes if proc.tool == args.tool]
-
-    attached_processes = tmux_attached_processes(processes, panes)
-    apply_tmux_pane_cwds(attached_processes, panes)
-    processes_missing_cwd = [proc for proc in attached_processes if proc.cwd is None]
-    if processes_missing_cwd:
-        resolve_process_cwds(processes_missing_cwd)
-    candidates_by_tool = build_session_candidates(attached_processes)
-    records: list[SessionRecord] = []
-
-    load_tasks: list[tuple[str, list[Path], SessionCandidates]] = []
-    if args.tool in ("all", "codex"):
-        load_tasks.append(
-            ("codex", [args.codex_dir], session_candidates_for_tool(candidates_by_tool, "codex"))
-        )
-    if args.tool in ("all", "opencode"):
-        load_tasks.append(
-            (
-                "opencode",
-                opencode_dirs,
-                session_candidates_for_tool(candidates_by_tool, "opencode"),
-            )
-        )
-    if args.tool in ("all", "cursor-agent"):
-        load_tasks.append(
-            (
-                "cursor-agent",
-                [args.cursor_dir],
-                session_candidates_for_tool(candidates_by_tool, "cursor-agent"),
-            )
-        )
-    if args.tool in ("all", "claude"):
-        load_tasks.append(
-            (
-                "claude",
-                [args.claude_dir],
-                session_candidates_for_tool(candidates_by_tool, "claude"),
-            )
-        )
-
-    if len(load_tasks) == 1:
-        tool, paths, candidates = load_tasks[0]
-        records.extend(load_sessions(tool, paths, candidates))
-    elif load_tasks:
-        with ThreadPoolExecutor(max_workers=len(load_tasks)) as executor:
-            futures = [
-                executor.submit(load_sessions, tool, paths, candidates)
-                for tool, paths, candidates in load_tasks
-            ]
-            for future in futures:
-                records.extend(future.result())
-
-    for rec in records:
-        score_session(rec, processes, args.active_minutes, args.recent_hours)
-
-    records = add_process_only_records(records, processes)
-    attach_tmux_panes(records, panes)
-    records = [rec for rec in records if rec.tmux_pane is not None]
-    for tool in ("codex", "opencode", "cursor-agent", "claude"):
-        records = deduplicate_tmux_pane_records(records, tool)
-    mark_feedback_required(records, capture_tmux_pane_preview)
-    records = sort_records(records)
-
-    if not args.include_stale:
-        records = [r for r in records if r.status != "stale"]
-
-    return records
+    token = CACHE_ENABLED.set(not getattr(args, "no_cache", False))
+    try:
+        return discover(args, sys.modules[__name__])
+    finally:
+        CACHE_ENABLED.reset(token)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -298,6 +230,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=12,
         help="freshness window for recent session writes",
     )
+    p.add_argument("--no-cache", action="store_true", help="bypass the persistent metadata cache")
     p.add_argument("--json", action="store_true", help="emit JSON")
     p.add_argument(
         "--pick",
@@ -325,10 +258,10 @@ def main() -> int:
     if args.pick and args.json:
         parser.error("--pick cannot be combined with --json")
 
-    records = build_records(args)
-
     if args.pick:
-        return run_picker(records)
+        return run_picker([], records_callback=lambda: build_records(args))
+
+    records = build_records(args)
     if args.json:
         print_json(records)
     else:
