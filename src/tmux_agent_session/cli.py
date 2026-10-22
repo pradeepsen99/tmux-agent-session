@@ -70,6 +70,7 @@ from .tmux import (
     focus_tmux_pane,
     tmux_target,
 )
+from .usage import ClaudeUsageTracker
 
 
 _PICKER_EXPORTS = {
@@ -259,7 +260,8 @@ def main() -> int:
         parser.error("--pick cannot be combined with --json")
 
     if args.pick:
-        return run_picker([], records_callback=lambda: build_records(args))
+        usage = ClaudeUsageTracker([args.claude_dir])
+        return run_picker([], records_callback=lambda: build_records(args), usage_callback=usage.totals)
 
     records = build_records(args)
     if args.json:

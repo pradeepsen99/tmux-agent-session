@@ -11,7 +11,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.events import Resize
-from textual.containers import Container, VerticalScroll
+from textual.containers import Container, Horizontal, VerticalScroll
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
@@ -33,10 +33,12 @@ from .models import SessionRecord
 from .session_cache import fingerprint
 from .session_details import load_session_details
 from .tmux import focus_tmux_pane, tmux_target
+from .usage import UsageTotals
 
 
 PICKER_COLUMNS = ("Directory", "Status", "Tool", "Target", "Model")
 AGE_REFRESH_SECONDS = 30
+USAGE_REFRESH_SECONDS = 60
 ACCENT = PALETTE["accent"]
 MUTED = PALETTE["muted"]
 
@@ -251,6 +253,39 @@ def summary_text(records: list[SessionRecord]) -> Text:
     return summary
 
 
+def format_token_count(count: int) -> str:
+    for suffix, size in (("B", 1_000_000_000), ("M", 1_000_000), ("K", 1_000)):
+        if count >= size:
+            return f"{count / size:.1f}{suffix}"
+    return str(count)
+
+
+def usage_text(totals: UsageTotals | None) -> Text:
+    text = Text("Claude 24h  ", style=MUTED)
+    if totals is None:
+        text.append("…", style=MUTED)
+        return text
+    text.append(f"{format_token_count(totals.total_tokens)} tokens", style="bold")
+    text.append("  ·  ", style=MUTED)
+    text.append(f"${totals.cost:,.2f}", style="bold green")
+    if totals.unpriced_models:
+        text.append("*", style=MUTED)
+    return text
+
+
+def usage_tooltip(totals: UsageTotals) -> str:
+    lines = [
+        f"Input        {totals.input_tokens:>14,}",
+        f"Cache write  {totals.cache_write_tokens:>14,}",
+        f"Cache read   {totals.cache_read_tokens:>14,}",
+        f"Output       {totals.output_tokens:>14,}",
+        "Estimated at Anthropic API list prices.",
+    ]
+    if totals.unpriced_models:
+        lines.append("* Not priced: " + ", ".join(sorted(totals.unpriced_models)))
+    return "\n".join(lines)
+
+
 def palette_css_variables() -> str:
     """Expose PALETTE to Textual CSS, whose ANSI color names carry an `ansi_` prefix."""
     return "".join(f"${'picker_' + name}: ansi_{color};\n" for name, color in PALETTE.items())
@@ -259,7 +294,9 @@ def palette_css_variables() -> str:
 class SessionPickerApp(App[int]):
     CSS = palette_css_variables() + """
     Screen { layout: vertical; background: ansi_default; color: ansi_default; padding: 1 2; }
-    #heading { height: 1; text-style: bold; color: $picker_accent; }
+    #header { height: 1; }
+    #heading { width: 1fr; text-style: bold; color: $picker_accent; text-wrap: nowrap; text-overflow: ellipsis; }
+    #usage { width: auto; }
     #summary { height: 2; color: $picker_muted; }
     #body { height: 1fr; layout: horizontal; border-top: solid $picker_border; }
     #session-list { width: 3fr; height: 100%; padding: 1 1 0 0; }
@@ -306,6 +343,7 @@ class SessionPickerApp(App[int]):
         focus_callback: Callable[[SessionRecord], bool] = focus_tmux_pane,
         records_callback: Callable[[], list[SessionRecord]] | None = None,
         details_callback: Callable[[SessionRecord], dict[str, str]] = load_session_details,
+        usage_callback: Callable[[], UsageTotals] | None = None,
     ) -> None:
         super().__init__(ansi_color=True)
         self.directory_groups = group_records_by_directory(records)
@@ -313,6 +351,7 @@ class SessionPickerApp(App[int]):
         self.focus_callback = focus_callback
         self.details_callback = details_callback
         self.records_callback = records_callback
+        self.usage_callback = usage_callback
         self.load_generation = 0
         self.loading = False
         self.snapshot_valid = True
@@ -321,7 +360,9 @@ class SessionPickerApp(App[int]):
         self.details_pending: set[tuple] = set()
 
     def compose(self) -> ComposeResult:
-        yield Static("Agent sessions  ·  Group: Directory", id="heading")
+        with Horizontal(id="header"):
+            yield Static("Agent sessions  ·  Group: Directory", id="heading")
+            yield Static(usage_text(None) if self.usage_callback else "", id="usage")
         yield Static(summary_text(self.records), id="summary")
         with Container(id="body"):
             with Container(id="session-list"):
@@ -343,6 +384,23 @@ class SessionPickerApp(App[int]):
         self.set_interval(AGE_REFRESH_SECONDS, self.refresh_ages)
         if self.records_callback is not None:
             self.action_refresh_records()
+        if self.usage_callback is not None:
+            self.refresh_usage()
+            self.set_interval(USAGE_REFRESH_SECONDS, self.refresh_usage)
+
+    def refresh_usage(self) -> None:
+        if self.usage_callback is not None:
+            self.run_worker(self.fetch_usage, group="usage-loading", exclusive=True)
+
+    async def fetch_usage(self) -> None:
+        try:
+            totals = await asyncio.to_thread(self.usage_callback)
+        except Exception:
+            # A usage readout must never take down the picker; keep the last value.
+            return
+        usage = self.query_one("#usage", Static)
+        usage.update(usage_text(totals))
+        usage.tooltip = usage_tooltip(totals)
 
     def refresh_ages(self) -> None:
         """Re-render rows so relative ages keep advancing between data refreshes."""
@@ -385,6 +443,7 @@ class SessionPickerApp(App[int]):
     def action_refresh_records(self) -> None:
         if self.records_callback is None:
             return
+        self.refresh_usage()
         self.load_generation += 1
         self.loading = True
         self.snapshot_valid = False
@@ -528,6 +587,11 @@ class SessionPickerApp(App[int]):
         self.query_one("#message", Static).update(message)
 
 
-def run_picker(records: list[SessionRecord], *, records_callback: Callable[[], list[SessionRecord]] | None = None) -> int:
-    result = SessionPickerApp(records, records_callback=records_callback).run()
+def run_picker(
+    records: list[SessionRecord],
+    *,
+    records_callback: Callable[[], list[SessionRecord]] | None = None,
+    usage_callback: Callable[[], UsageTotals] | None = None,
+) -> int:
+    result = SessionPickerApp(records, records_callback=records_callback, usage_callback=usage_callback).run()
     return result if result is not None else 1
