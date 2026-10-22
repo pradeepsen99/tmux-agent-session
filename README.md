@@ -139,6 +139,26 @@ uv run tas --tool cursor-agent
 uv run tas --tool claude
 ```
 
+### Claude token usage
+
+The picker header shows a running total of Claude Code tokens used over the last 24 hours, refreshed every minute and whenever you press `r`. The same numbers are available from the CLI:
+
+```bash
+uv run tas --usage              # breakdown by input, output, cache write, cache read
+uv run tas --usage --json       # machine-readable
+uv run tas --usage-line         # one line, e.g. "Claude 24h: 1.2M in/out · 48M cache"
+uv run tas --usage --usage-hours 5
+```
+
+Totals come from the transcripts in `~/.claude/projects` and `~/.config/claude/projects` (or `CLAUDE_CONFIG_DIR`, or `--claude-dir`). Each API response is counted once even when Claude writes it on several lines or copies it into a resumed session. Cache reads are shown separately because they usually dwarf everything else and are billed at a steep discount.
+
+To keep the total in your tmux status bar:
+
+```tmux
+set -g status-interval 60
+set -g status-right '#(tas --usage-line)'
+```
+
 Show scoring reasons and include stale sessions:
 
 ```bash

@@ -247,8 +247,47 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--include-stale", action="store_true", help="include stale sessions"
     )
+    p.add_argument(
+        "--usage",
+        action="store_true",
+        help="show Claude token usage over the rolling window (combine with --json)",
+    )
+    p.add_argument(
+        "--usage-line",
+        action="store_true",
+        help="print a one-line Claude token usage summary, e.g. for a tmux status bar",
+    )
+    p.add_argument(
+        "--usage-hours",
+        type=float,
+        default=24,
+        help="rolling window for token usage, in hours (default: 24)",
+    )
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return p
+
+
+def usage_dirs(args: argparse.Namespace) -> list[Path]:
+    from .usage import default_usage_dirs
+
+    if args.claude_dir != DEFAULT_CLAUDE_DIR:
+        return [args.claude_dir]
+    return default_usage_dirs()
+
+
+def run_usage(args: argparse.Namespace) -> int:
+    import json
+
+    from .usage import claude_usage, print_usage, usage_line
+
+    usage = claude_usage(usage_dirs(args), args.usage_hours)
+    if args.usage_line:
+        print(usage_line(usage, args.usage_hours))
+    elif args.json:
+        print(json.dumps({"tool": "claude", "window_hours": args.usage_hours, **usage.to_dict()}, indent=2))
+    else:
+        print_usage(usage, args.usage_hours)
+    return 0
 
 
 def main() -> int:
@@ -257,9 +296,23 @@ def main() -> int:
 
     if args.pick and args.json:
         parser.error("--pick cannot be combined with --json")
+    if args.pick and (args.usage or args.usage_line):
+        parser.error("--pick cannot be combined with --usage or --usage-line")
+    if args.usage_hours <= 0:
+        parser.error("--usage-hours must be positive")
+
+    if args.usage or args.usage_line:
+        return run_usage(args)
 
     if args.pick:
-        return run_picker([], records_callback=lambda: build_records(args))
+        from .usage import UsageTracker, usage_line
+
+        tracker = UsageTracker(usage_dirs(args), args.usage_hours)
+        return run_picker(
+            [],
+            records_callback=lambda: build_records(args),
+            usage_callback=lambda: usage_line(tracker.scan(), args.usage_hours),
+        )
 
     records = build_records(args)
     if args.json:

@@ -11,7 +11,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.events import Resize
-from textual.containers import Container, VerticalScroll
+from textual.containers import Container, Horizontal, VerticalScroll
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
@@ -37,6 +37,7 @@ from .tmux import focus_tmux_pane, tmux_target
 
 PICKER_COLUMNS = ("Directory", "Status", "Tool", "Target", "Model")
 AGE_REFRESH_SECONDS = 30
+USAGE_REFRESH_SECONDS = 60
 ACCENT = PALETTE["accent"]
 MUTED = PALETTE["muted"]
 
@@ -259,7 +260,9 @@ def palette_css_variables() -> str:
 class SessionPickerApp(App[int]):
     CSS = palette_css_variables() + """
     Screen { layout: vertical; background: ansi_default; color: ansi_default; padding: 1 2; }
-    #heading { height: 1; text-style: bold; color: $picker_accent; }
+    #header { height: 1; }
+    #heading { width: 1fr; height: 1; text-style: bold; color: $picker_accent; }
+    #usage { width: auto; height: 1; color: $picker_muted; padding-left: 2; }
     #summary { height: 2; color: $picker_muted; }
     #body { height: 1fr; layout: horizontal; border-top: solid $picker_border; }
     #session-list { width: 3fr; height: 100%; padding: 1 1 0 0; }
@@ -306,6 +309,7 @@ class SessionPickerApp(App[int]):
         focus_callback: Callable[[SessionRecord], bool] = focus_tmux_pane,
         records_callback: Callable[[], list[SessionRecord]] | None = None,
         details_callback: Callable[[SessionRecord], dict[str, str]] = load_session_details,
+        usage_callback: Callable[[], str] | None = None,
     ) -> None:
         super().__init__(ansi_color=True)
         self.directory_groups = group_records_by_directory(records)
@@ -313,6 +317,7 @@ class SessionPickerApp(App[int]):
         self.focus_callback = focus_callback
         self.details_callback = details_callback
         self.records_callback = records_callback
+        self.usage_callback = usage_callback
         self.load_generation = 0
         self.loading = False
         self.snapshot_valid = True
@@ -321,7 +326,9 @@ class SessionPickerApp(App[int]):
         self.details_pending: set[tuple] = set()
 
     def compose(self) -> ComposeResult:
-        yield Static("Agent sessions  ·  Group: Directory", id="heading")
+        with Horizontal(id="header"):
+            yield Static("Agent sessions  ·  Group: Directory", id="heading")
+            yield Static("", id="usage", markup=False)
         yield Static(summary_text(self.records), id="summary")
         with Container(id="body"):
             with Container(id="session-list"):
@@ -341,8 +348,13 @@ class SessionPickerApp(App[int]):
         self.apply_responsive_layout(self.size.width)
         self.replace_records(self.records)
         self.set_interval(AGE_REFRESH_SECONDS, self.refresh_ages)
+        if self.usage_callback is not None:
+            self.set_interval(USAGE_REFRESH_SECONDS, self.refresh_usage)
+        # Refreshing records also refreshes usage.
         if self.records_callback is not None:
             self.action_refresh_records()
+        else:
+            self.refresh_usage()
 
     def refresh_ages(self) -> None:
         """Re-render rows so relative ages keep advancing between data refreshes."""
@@ -382,7 +394,21 @@ class SessionPickerApp(App[int]):
         sessions.focus()
         self.update_selected_record()
 
+    def refresh_usage(self) -> None:
+        if self.usage_callback is None:
+            return
+        self.run_worker(self.fetch_usage, group="usage", exclusive=True)
+
+    async def fetch_usage(self) -> None:
+        try:
+            line = await asyncio.to_thread(self.usage_callback)
+        except Exception:
+            # Token usage is informational; unreadable transcripts must not close the picker.
+            return
+        self.query_one("#usage", Static).update(line)
+
     def action_refresh_records(self) -> None:
+        self.refresh_usage()
         if self.records_callback is None:
             return
         self.load_generation += 1
@@ -528,6 +554,11 @@ class SessionPickerApp(App[int]):
         self.query_one("#message", Static).update(message)
 
 
-def run_picker(records: list[SessionRecord], *, records_callback: Callable[[], list[SessionRecord]] | None = None) -> int:
-    result = SessionPickerApp(records, records_callback=records_callback).run()
+def run_picker(
+    records: list[SessionRecord],
+    *,
+    records_callback: Callable[[], list[SessionRecord]] | None = None,
+    usage_callback: Callable[[], str] | None = None,
+) -> int:
+    result = SessionPickerApp(records, records_callback=records_callback, usage_callback=usage_callback).run()
     return result if result is not None else 1
