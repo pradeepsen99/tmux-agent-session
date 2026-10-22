@@ -261,7 +261,7 @@ def main() -> int:
 
     if args.pick:
         usage = ClaudeUsageTracker([args.claude_dir])
-        return run_picker([], records_callback=lambda: build_records(args), usage_callback=usage.totals)
+        return run_picker([], records_callback=lambda: build_records(args), usage_callback=usage.report)
 
     records = build_records(args)
     if args.json:

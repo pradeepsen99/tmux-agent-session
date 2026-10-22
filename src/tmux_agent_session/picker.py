@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import textwrap
 from functools import partial
 from collections.abc import Callable
@@ -12,7 +13,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.events import Resize
 from textual.containers import Container, Horizontal, VerticalScroll
-from textual.widgets import OptionList, Static
+from textual.widgets import OptionList, Static, TabbedContent, TabPane, Tabs
 from textual.widgets.option_list import Option
 
 from .formatting import (
@@ -33,7 +34,8 @@ from .models import SessionRecord
 from .session_cache import fingerprint
 from .session_details import load_session_details
 from .tmux import focus_tmux_pane, tmux_target
-from .usage import UsageTotals
+from .usage import DailyUsage, UsageReport, UsageTotals
+from .usage_view import day_row, day_scale, format_token_count, model_breakdown, usage_footnote, usage_overview
 
 
 PICKER_COLUMNS = ("Directory", "Status", "Tool", "Target", "Model")
@@ -253,13 +255,6 @@ def summary_text(records: list[SessionRecord]) -> Text:
     return summary
 
 
-def format_token_count(count: int) -> str:
-    for suffix, size in (("B", 1_000_000_000), ("M", 1_000_000), ("K", 1_000)):
-        if count >= size:
-            return f"{count / size:.1f}{suffix}"
-    return str(count)
-
-
 def usage_text(totals: UsageTotals | None) -> Text:
     text = Text("Claude 24h  ", style=MUTED)
     if totals is None:
@@ -297,20 +292,32 @@ class SessionPickerApp(App[int]):
     #header { height: 1; }
     #heading { width: 1fr; text-style: bold; color: $picker_accent; text-wrap: nowrap; text-overflow: ellipsis; }
     #usage { width: auto; }
-    #summary { height: 2; color: $picker_muted; }
+    #tabs { height: 1fr; }
+    #tabs > ContentSwitcher, #tabs TabPane { height: 1fr; padding: 0; }
+    #tabs Tab { padding: 0 2 0 0; }
+    #tabs Tab.-active { color: $picker_accent; }
+    #tabs Underline > .underline--bar { color: $picker_accent; background: $picker_border; }
+    #summary { height: 2; margin-top: 1; color: $picker_muted; }
     #body { height: 1fr; layout: horizontal; border-top: solid $picker_border; }
     #session-list { width: 3fr; height: 100%; padding: 1 1 0 0; }
     #list-heading { height: 2; color: $picker_muted; padding-left: 4; }
-    #sessions { width: 100%; height: 1fr; border: none; padding: 0; background: transparent; color: ansi_default; }
-    #sessions:focus { border: none; background-tint: transparent; }
-    #sessions > .option-list--option { padding: 0; }
+    #sessions, #usage-days { width: 100%; height: 1fr; border: none; padding: 0; background: transparent; color: ansi_default; }
+    #sessions:focus, #usage-days:focus { border: none; background-tint: transparent; }
+    #sessions > .option-list--option, #usage-days > .option-list--option { padding: 0; }
     #sessions > .option-list--option-disabled { color: $picker_accent; text-style: none; }
-    #sessions > .option-list--option-highlighted { background: transparent; color: ansi_default; text-style: none; }
-    #sessions > .option-list--option-hover { background: transparent; }
+    #sessions > .option-list--option-highlighted, #usage-days > .option-list--option-highlighted {
+        background: transparent; color: ansi_default; text-style: none;
+    }
+    #sessions > .option-list--option-hover, #usage-days > .option-list--option-hover { background: transparent; }
     #sidebar { width: 2fr; min-width: 36; height: 100%; border-left: solid $picker_border; padding: 1 2; }
-    #detail-heading { height: 2; color: $picker_muted; }
+    #detail-heading, #usage-detail-heading { height: 2; color: $picker_muted; }
     #details { height: auto; }
-    #sessions, #sidebar {
+    #usage-overview { height: auto; margin-top: 1; }
+    #usage-body { height: 1fr; layout: horizontal; margin-top: 1; }
+    #usage-days { width: 3fr; padding-right: 1; }
+    #usage-sidebar { width: 2fr; min-width: 36; height: 100%; border-left: solid $picker_border; padding: 0 2; }
+    #usage-footnote { height: auto; margin-top: 1; }
+    #sessions, #sidebar, #usage-days, #usage-sidebar {
         scrollbar-size: 1 1;
         scrollbar-background: ansi_default;
         scrollbar-background-hover: ansi_default;
@@ -325,6 +332,9 @@ class SessionPickerApp(App[int]):
     #body.narrow { layout: vertical; }
     #session-list.narrow { width: 100%; height: 3fr; }
     #sidebar.narrow { width: 100%; min-width: 1; height: 2fr; border-left: none; border-top: solid $picker_border; }
+    #usage-body.narrow { layout: vertical; }
+    #usage-days.narrow { width: 100%; height: auto; max-height: 60%; padding-right: 0; }
+    #usage-sidebar.narrow { width: 100%; min-width: 1; height: 1fr; border-left: none; border-top: solid $picker_border; padding: 1 0 0 0; }
     """
 
     BINDINGS = [
@@ -334,6 +344,8 @@ class SessionPickerApp(App[int]):
         Binding("r", "refresh_records", "Refresh"),
         Binding("j", "cursor_down", "Down"),
         Binding("k", "cursor_up", "Up"),
+        Binding("1", "show_tab('sessions-tab')", "Sessions", show=False),
+        Binding("2", "show_tab('usage-tab')", "Usage", show=False),
     ]
 
     def __init__(
@@ -343,7 +355,7 @@ class SessionPickerApp(App[int]):
         focus_callback: Callable[[SessionRecord], bool] = focus_tmux_pane,
         records_callback: Callable[[], list[SessionRecord]] | None = None,
         details_callback: Callable[[SessionRecord], dict[str, str]] = load_session_details,
-        usage_callback: Callable[[], UsageTotals] | None = None,
+        usage_callback: Callable[[], UsageReport] | None = None,
     ) -> None:
         super().__init__(ansi_color=True)
         self.directory_groups = group_records_by_directory(records)
@@ -358,27 +370,46 @@ class SessionPickerApp(App[int]):
         self.selected_option_id: str | None = None
         self.details_cache: dict[tuple, dict[str, str]] = {}
         self.details_pending: set[tuple] = set()
+        self.usage_days: dict[str, DailyUsage] = {}
+        self.usage_today: dt.date | None = None
+        self.usage_day_id: str | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="header"):
             yield Static("Agent sessions  ·  Group: Directory", id="heading")
             yield Static(usage_text(None) if self.usage_callback else "", id="usage")
-        yield Static(summary_text(self.records), id="summary")
-        with Container(id="body"):
-            with Container(id="session-list"):
-                yield Static("Sessions", id="list-heading")
-                yield OptionList(id="sessions")
-            with VerticalScroll(id="sidebar"):
-                yield Static("Session details", id="detail-heading")
-                yield Static(id="details", markup=False)
+        with TabbedContent(id="tabs"):
+            with TabPane("Sessions", id="sessions-tab"):
+                yield Static(summary_text(self.records), id="summary")
+                with Container(id="body"):
+                    with Container(id="session-list"):
+                        yield Static("Sessions", id="list-heading")
+                        yield OptionList(id="sessions")
+                    with VerticalScroll(id="sidebar"):
+                        yield Static("Session details", id="detail-heading")
+                        yield Static(id="details", markup=False)
+            with TabPane("Usage", id="usage-tab"):
+                yield Static(
+                    Text("Loading usage…" if self.usage_callback else "Usage tracking is unavailable.", style=MUTED),
+                    id="usage-overview",
+                )
+                with Container(id="usage-body"):
+                    yield OptionList(id="usage-days")
+                    with VerticalScroll(id="usage-sidebar"):
+                        yield Static("Models", id="usage-detail-heading")
+                        yield Static(id="usage-detail")
+                yield Static(id="usage-footnote")
         yield Static(id="message")
         yield Static(Text.assemble(
             ("↑/↓", ACCENT), " move   ", ("j/k", ACCENT), " move   ",
-            ("enter", ACCENT), " focus   ", ("r", ACCENT), " refresh   ", ("q / esc", ACCENT), " quit",
+            ("enter", ACCENT), " focus   ", ("1/2", ACCENT), " tabs   ",
+            ("r", ACCENT), " refresh   ", ("q / esc", ACCENT), " quit",
         ), id="keys")
 
     def on_mount(self) -> None:
         self.title = "Agent sessions"
+        # Tabs switch by click or 1/2; keeping focus off the tab strip leaves arrows driving the content.
+        self.query_one(Tabs).can_focus = False
         self.apply_responsive_layout(self.size.width)
         self.replace_records(self.records)
         self.set_interval(AGE_REFRESH_SECONDS, self.refresh_ages)
@@ -394,13 +425,53 @@ class SessionPickerApp(App[int]):
 
     async def fetch_usage(self) -> None:
         try:
-            totals = await asyncio.to_thread(self.usage_callback)
+            report = await asyncio.to_thread(self.usage_callback)
         except Exception:
             # A usage readout must never take down the picker; keep the last value.
             return
         usage = self.query_one("#usage", Static)
-        usage.update(usage_text(totals))
-        usage.tooltip = usage_tooltip(totals)
+        usage.update(usage_text(report.window))
+        usage.tooltip = usage_tooltip(report.window)
+        self.replace_usage_report(report)
+
+    def replace_usage_report(self, report: UsageReport) -> None:
+        previous = self.usage_day_id
+        self.query_one("#usage-overview", Static).update(usage_overview(report))
+        self.query_one("#usage-footnote", Static).update(usage_footnote(report))
+        self.usage_days = {day.day.isoformat(): day for day in reversed(report.days)}
+        self.usage_today = report.days[-1].day if report.days else None
+        self.usage_day_id = None
+        days = self.query_one("#usage-days", OptionList)
+        days.clear_options()
+        scale = day_scale(report.days)
+        for option_id, day in self.usage_days.items():
+            days.add_option(Option(day_row(day, scale, self.usage_today), id=option_id))
+        if self.usage_days:
+            # Keep the chosen day across refreshes; otherwise start on today.
+            target = previous if previous in self.usage_days else next(iter(self.usage_days))
+            days.highlighted = days.get_option_index(target)
+        self.update_usage_selection()
+
+    def update_usage_selection(self) -> None:
+        days = self.query_one("#usage-days", OptionList)
+        scale = day_scale(list(self.usage_days.values()))
+        if self.usage_day_id is not None:
+            days.replace_option_prompt(self.usage_day_id, day_row(self.usage_days[self.usage_day_id], scale, self.usage_today))
+        option = days.highlighted_option
+        self.usage_day_id = option.id if option is not None else None
+        day = self.usage_days.get(self.usage_day_id) if self.usage_day_id else None
+        if day is not None:
+            days.replace_option_prompt(self.usage_day_id, day_row(day, scale, self.usage_today, True))
+        self.query_one("#usage-detail", Static).update(model_breakdown(day, self.usage_today))
+
+    def action_show_tab(self, tab_id: str) -> None:
+        self.query_one("#tabs", TabbedContent).active = tab_id
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        if event.pane.id == "usage-tab":
+            self.query_one("#usage-days").focus()
+        else:
+            self.query_one("#sessions").focus()
 
     def refresh_ages(self) -> None:
         """Re-render rows so relative ages keep advancing between data refreshes."""
@@ -437,7 +508,8 @@ class SessionPickerApp(App[int]):
             self.update_details(None)
             return
         sessions.highlighted = sessions.get_option_index(str(initial_index))
-        sessions.focus()
+        if self.sessions_tab_active():
+            sessions.focus()
         self.update_selected_record()
 
     def action_refresh_records(self) -> None:
@@ -469,7 +541,7 @@ class SessionPickerApp(App[int]):
 
     def apply_responsive_layout(self, width: int) -> None:
         narrow = width < 88
-        for selector in ("#body", "#session-list", "#sidebar"):
+        for selector in ("#body", "#session-list", "#sidebar", "#usage-body", "#usage-days", "#usage-sidebar"):
             self.query_one(selector).set_class(narrow, "narrow")
 
     @property
@@ -483,22 +555,37 @@ class SessionPickerApp(App[int]):
         index = int(option.id)
         return self.records[index] if index < len(self.records) else None
 
-    def on_option_list_option_highlighted(self, _event: OptionList.OptionHighlighted) -> None:
-        self.update_selected_record()
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if event.option_list.id == "usage-days":
+            self.update_usage_selection()
+        else:
+            self.update_selected_record()
 
-    def on_option_list_option_selected(self, _event: OptionList.OptionSelected) -> None:
-        self.action_focus_selected()
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id == "sessions":
+            self.action_focus_selected()
 
     def action_cursor_down(self) -> None:
-        self.query_one("#sessions", OptionList).action_cursor_down()
+        if self.sessions_tab_active():
+            self.query_one("#sessions", OptionList).action_cursor_down()
+        else:
+            self.query_one("#usage-days", OptionList).action_cursor_down()
 
     def action_cursor_up(self) -> None:
-        self.query_one("#sessions", OptionList).action_cursor_up()
+        if self.sessions_tab_active():
+            self.query_one("#sessions", OptionList).action_cursor_up()
+        else:
+            self.query_one("#usage-days", OptionList).action_cursor_up()
 
     def action_cancel(self) -> None:
         self.exit(1)
 
+    def sessions_tab_active(self) -> bool:
+        return self.query_one("#tabs", TabbedContent).active == "sessions-tab"
+
     def action_focus_selected(self) -> None:
+        if not self.sessions_tab_active():
+            return
         if not self.snapshot_valid:
             self.update_message("Refreshing sessions…" if self.loading else "Press r to refresh before focusing.")
             return
@@ -591,7 +678,7 @@ def run_picker(
     records: list[SessionRecord],
     *,
     records_callback: Callable[[], list[SessionRecord]] | None = None,
-    usage_callback: Callable[[], UsageTotals] | None = None,
+    usage_callback: Callable[[], UsageReport] | None = None,
 ) -> int:
     result = SessionPickerApp(records, records_callback=records_callback, usage_callback=usage_callback).run()
     return result if result is not None else 1

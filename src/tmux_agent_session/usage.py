@@ -12,6 +12,7 @@ from .session_cache import fingerprint
 
 
 USAGE_WINDOW_SECONDS = 24 * 60 * 60
+USAGE_HISTORY_DAYS = 14
 
 
 @dataclass(frozen=True)
@@ -204,16 +205,36 @@ def _recent_transcripts(base_paths: Iterable[Path], cutoff: float) -> Iterable[P
                 continue
 
 
-class ClaudeUsageTracker:
-    """Totals Claude usage over a rolling window, re-reading only transcripts that changed."""
+@dataclass(frozen=True)
+class DailyUsage:
+    day: dt.date
+    totals: UsageTotals
+    models: dict[str, UsageTotals] = field(default_factory=dict)
 
-    def __init__(self, base_paths: list[Path], window_seconds: int = USAGE_WINDOW_SECONDS) -> None:
+
+@dataclass
+class UsageReport:
+    """Rolling-window totals plus one bucket per local calendar day, oldest first, ending today."""
+
+    window: UsageTotals
+    days: list[DailyUsage]
+
+
+class ClaudeUsageTracker:
+    """Totals Claude usage over a rolling window and recent days, re-reading only transcripts that changed."""
+
+    def __init__(
+        self,
+        base_paths: list[Path],
+        window_seconds: int = USAGE_WINDOW_SECONDS,
+        history_days: int = USAGE_HISTORY_DAYS,
+    ) -> None:
         self.base_paths = base_paths
         self.window_seconds = window_seconds
+        self.history_days = history_days
         self.file_cache: dict[Path, tuple[tuple | None, dict[tuple[str, str], UsageEntry]]] = {}
 
-    def totals(self, now: float | None = None) -> UsageTotals:
-        cutoff = (time.time() if now is None else now) - self.window_seconds
+    def _entries(self, cutoff: float) -> Iterable[UsageEntry]:
         merged: dict[tuple[str, str], UsageEntry] = {}
         live_cache: dict[Path, tuple[tuple | None, dict[tuple[str, str], UsageEntry]]] = {}
         for path in _recent_transcripts(self.base_paths, cutoff):
@@ -224,9 +245,28 @@ class ClaudeUsageTracker:
             # Resumed or forked sessions copy earlier responses into new files.
             merged.update(entries)
         self.file_cache = live_cache
+        return merged.values()
 
-        totals = UsageTotals()
-        for entry in merged.values():
-            if entry.timestamp >= cutoff:
-                totals.add(entry)
-        return totals
+    def report(self, now: float | None = None) -> UsageReport:
+        now = time.time() if now is None else now
+        window_start = now - self.window_seconds
+        today = dt.datetime.fromtimestamp(now).date()
+        first_day = today - dt.timedelta(days=max(1, self.history_days) - 1)
+        history_start = dt.datetime.combine(first_day, dt.time()).timestamp()
+
+        window = UsageTotals()
+        days = {
+            first_day + dt.timedelta(days=offset): DailyUsage(first_day + dt.timedelta(days=offset), UsageTotals())
+            for offset in range((today - first_day).days + 1)
+        }
+        for entry in self._entries(min(window_start, history_start)):
+            if entry.timestamp >= window_start:
+                window.add(entry)
+            day = days.get(dt.datetime.fromtimestamp(entry.timestamp).date())
+            if day is not None:
+                day.totals.add(entry)
+                day.models.setdefault(entry.model, UsageTotals()).add(entry)
+        return UsageReport(window, list(days.values()))
+
+    def totals(self, now: float | None = None) -> UsageTotals:
+        return self.report(now).window
