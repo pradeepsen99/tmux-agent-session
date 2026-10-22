@@ -702,3 +702,95 @@ def test_claude_load_sessions_matches_by_session_id_scan(tmp_path: Path) -> None
     records = claude.load_sessions([base], candidates)
 
     assert [rec.session_id for rec in records] == [session_id]
+
+
+def test_claude_load_sessions_opens_session_id_file_directly(tmp_path: Path, monkeypatch) -> None:
+    base = tmp_path / "projects"
+    cwd = str((tmp_path / "repo").resolve())
+    session_id = "55555555-5555-5555-5555-555555555555"
+    target = _write_claude_transcript(base, cwd, session_id)
+    _write_claude_transcript(base, cwd, "66666666-6666-6666-6666-666666666666")
+    # Subagent transcripts reuse the parent's session id and must not be read.
+    subagent = target.parent / session_id / "subagents" / "agent-1.jsonl"
+    subagent.parent.mkdir(parents=True)
+    subagent.write_text(target.read_text(), encoding="utf-8")
+    parsed: list[Path] = []
+    original = claude.extract_claude_session
+    def extract(path, candidates=None):
+        parsed.append(path)
+        return original(path, candidates)
+    monkeypatch.setattr(claude, "extract_claude_session", extract)
+
+    candidates = cli.SessionCandidates(session_ids=frozenset({session_id}))
+    records = claude.load_sessions([base], candidates)
+
+    assert [rec.session_id for rec in records] == [session_id]
+    assert parsed == [target]
+
+
+def test_claude_unfiltered_scan_skips_subagent_transcripts(tmp_path: Path) -> None:
+    base = tmp_path / "projects"
+    cwd = str((tmp_path / "repo").resolve())
+    session_id = "77777777-7777-7777-7777-777777777777"
+    target = _write_claude_transcript(base, cwd, session_id)
+    subagent = target.parent / session_id / "subagents" / "agent-1.jsonl"
+    subagent.parent.mkdir(parents=True)
+    subagent.write_text(target.read_text(), encoding="utf-8")
+
+    records = claude.load_sessions([base])
+
+    assert [rec.path for rec in records] == [target]
+
+
+def test_claude_load_sessions_reuses_cached_metadata(tmp_path: Path, monkeypatch) -> None:
+    base = tmp_path / "projects"
+    cwd = str((tmp_path / "repo").resolve())
+    path = _write_claude_transcript(base, cwd, "88888888-8888-8888-8888-888888888888", title="First")
+    candidates = cli.SessionCandidates(cwds=frozenset({cwd}))
+    baseline = claude.load_sessions([base], candidates)
+    original = claude.extract_claude_session
+    parsed: list[Path] = []
+    def extract(path, candidates=None):
+        parsed.append(path)
+        return original(path, candidates)
+    monkeypatch.setattr(claude, "extract_claude_session", extract)
+
+    assert claude.load_sessions([base], candidates) == baseline
+    assert parsed == []
+    _append_jsonl(path, [{"type": "ai-title", "aiTitle": "Second"}])
+    assert claude.load_sessions([base], candidates)[0].metadata["title"] == "Second"
+    assert parsed == [path]
+
+
+def test_claude_head_scan_decodes_only_lines_with_missing_fields(tmp_path: Path, monkeypatch) -> None:
+    session_id = "99999999-9999-9999-9999-999999999999"
+    path = tmp_path / f"{session_id}.jsonl"
+    _append_jsonl(
+        path,
+        [
+            {"type": "user", "sessionId": session_id, "cwd": "/repo", "gitBranch": "main", "version": "2.1"},
+            {"type": "tool_result", "content": "z" * 100_000},
+            {"type": "assistant", "sessionId": "ignored", "message": {"model": "claude-opus-5-5"}},
+            {"type": "ai-title", "aiTitle": "  Head title  "},
+            {"type": "assistant", "message": {"model": "never-read"}},
+        ],
+    )
+    decoded: list[bytes] = []
+    real_loads = json.loads
+    def counting_loads(raw, *args, **kwargs):
+        decoded.append(raw)
+        return real_loads(raw, *args, **kwargs)
+    monkeypatch.setattr(claude.json, "loads", counting_loads)
+
+    fields = claude._head_fields(path)
+
+    assert fields == {
+        "sessionId": session_id,
+        "cwd": "/repo",
+        "gitBranch": "main",
+        "version": "2.1",
+        "model": "claude-opus-5-5",
+        "title": "Head title",
+    }
+    # The large tool result and the line after every field was found are skipped.
+    assert len(decoded) == 3

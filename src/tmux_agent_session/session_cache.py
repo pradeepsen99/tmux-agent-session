@@ -22,8 +22,12 @@ def fingerprint(path: Path) -> tuple[int, int, int, int] | None:
 
 
 class SessionCache:
-    def __init__(self) -> None:
+    def __init__(self, tool: str = "codex") -> None:
+        self.tool = tool
         self.conn = None
+        # Writes are flushed in one short transaction on close so parallel
+        # loaders never hold the write lock for a whole scan.
+        self.pending: list[tuple] = []
         if not CACHE_ENABLED.get():
             return
         base = Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")).expanduser()
@@ -39,7 +43,7 @@ class SessionCache:
         if self.conn is None or stamp is None:
             return False, None
         try:
-            row = self.conn.execute("SELECT payload FROM metadata WHERE tool=? AND path=? AND version=? AND fingerprint=?", ("codex", str(path.resolve()), PARSER_VERSION, json.dumps(stamp))).fetchone()
+            row = self.conn.execute("SELECT payload FROM metadata WHERE tool=? AND path=? AND version=? AND fingerprint=?", (self.tool, str(path.resolve()), PARSER_VERSION, json.dumps(stamp))).fetchone()
             if row is None:
                 return False, None
             data = json.loads(row[0])
@@ -47,7 +51,7 @@ class SessionCache:
                 return True, None
             if not isinstance(data, dict) or not isinstance(data.get("session_id"), str) or not isinstance(data.get("metadata"), dict):
                 return False, None
-            return True, SessionRecord(tool="codex", path=path, **data)
+            return True, SessionRecord(tool=self.tool, path=path, **data)
         except sqlite3.Error:
             self.close()
             return False, None
@@ -59,15 +63,17 @@ class SessionCache:
             return
         data = None if rec is None else {"session_id": rec.session_id, "cwd": rec.cwd, "last_write": rec.last_write, "metadata": rec.metadata}
         try:
-            self.conn.execute("INSERT OR REPLACE INTO metadata VALUES (?, ?, ?, ?, ?)", ("codex", str(path.resolve()), PARSER_VERSION, json.dumps(stamp), json.dumps(data)))
-        except (OSError, sqlite3.Error):
-            self.close()
+            self.pending.append((self.tool, str(path.resolve()), PARSER_VERSION, json.dumps(stamp), json.dumps(data)))
+        except OSError:
+            pass
 
     def close(self) -> None:
         if self.conn is not None:
             try:
-                self.conn.commit()
+                with self.conn:
+                    self.conn.executemany("INSERT OR REPLACE INTO metadata VALUES (?, ?, ?, ?, ?)", self.pending)
             except sqlite3.Error:
                 pass
+            self.pending.clear()
             self.conn.close()
             self.conn = None

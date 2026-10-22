@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..models import BLANK_SESSION_TITLE, SessionCandidates, SessionRecord
+from ..session_cache import SessionCache, fingerprint
 from ..session_files import (
     normalize_cwd,
     safe_mtime,
@@ -18,6 +19,15 @@ DEFAULT_CLAUDE_DIR = Path("~/.claude/projects").expanduser()
 CLAUDE_HEAD_SCAN_LINES = 64
 CLAUDE_TAIL_BLOCK_BYTES = 64 * 1024
 CLAUDE_TAIL_MAX_BYTES = 1024 * 1024
+# Raw key markers used to skip decoding head lines that cannot add a missing field.
+CLAUDE_HEAD_KEY_MARKERS = {
+    "sessionId": b'"sessionId"',
+    "cwd": b'"cwd"',
+    "gitBranch": b'"gitBranch"',
+    "version": b'"version"',
+    "title": b'"aiTitle"',
+    "model": b'"model"',
+}
 
 
 def project_dir_name(cwd: str) -> str:
@@ -32,25 +42,54 @@ def project_dir_name(cwd: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", cwd)
 
 
-def _iter_jsonl_head(
+def _head_fields(
     path: Path, max_lines: int = CLAUDE_HEAD_SCAN_LINES
-) -> Iterable[dict[str, Any]]:
+) -> dict[str, str]:
+    """Return the first value of each ``CLAUDE_HEAD_KEY_MARKERS`` field in the head.
+
+    Head lines can carry large tool results, so a line is only decoded when it
+    mentions a field that is still missing, and the scan stops once all are found.
+    """
+    found: dict[str, str] = {}
     try:
-        with path.open("r", encoding="utf-8") as f:
+        with path.open("rb") as f:
             for index, raw_line in enumerate(f):
                 if index >= max_lines:
                     break
-                line = raw_line.strip()
-                if not line:
+                missing = [key for key in CLAUDE_HEAD_KEY_MARKERS if key not in found]
+                if not missing:
+                    break
+                if not any(CLAUDE_HEAD_KEY_MARKERS[key] in raw_line for key in missing):
                     continue
                 try:
-                    item = json.loads(line)
-                except json.JSONDecodeError:
+                    entry = json.loads(raw_line)
+                except ValueError:
                     continue
-                if isinstance(item, dict):
-                    yield item
-    except (OSError, UnicodeDecodeError):
-        return
+                if not isinstance(entry, dict):
+                    continue
+                for key in missing:
+                    value = _head_field_value(entry, key)
+                    if value is not None:
+                        found[key] = value
+    except OSError:
+        pass
+    return found
+
+
+def _head_field_value(entry: dict[str, Any], key: str) -> str | None:
+    if key == "title":
+        value = entry.get("aiTitle")
+    elif key == "model":
+        message = entry.get("message")
+        value = message.get("model") if isinstance(message, dict) else None
+    else:
+        value = entry.get(key)
+    if not isinstance(value, str):
+        return None
+    # gitBranch and version were historically kept verbatim, even when blank.
+    if key in ("gitBranch", "version"):
+        return value
+    return value.strip() or None
 
 
 def _ai_title_from_line(line: bytes) -> str | None:
@@ -97,32 +136,12 @@ def _latest_ai_title(path: Path) -> str | None:
 def extract_claude_session(
     path: Path, candidates: SessionCandidates | None = None
 ) -> SessionRecord | None:
-    session_id: str | None = None
-    cwd: str | None = None
-    metadata: dict[str, Any] = {}
-
-    for entry in _iter_jsonl_head(path):
-        if session_id is None:
-            value = entry.get("sessionId")
-            if isinstance(value, str) and value.strip():
-                session_id = value.strip()
-        if cwd is None:
-            value = entry.get("cwd")
-            if isinstance(value, str) and value.strip():
-                cwd = value.strip()
-        for key in ("gitBranch", "version"):
-            if key not in metadata and isinstance(entry.get(key), str):
-                metadata[key] = entry[key]
-        if "title" not in metadata:
-            title = entry.get("aiTitle")
-            if isinstance(title, str) and title.strip():
-                metadata["title"] = title.strip()
-        if "model" not in metadata:
-            message = entry.get("message")
-            if isinstance(message, dict):
-                model = message.get("model")
-                if isinstance(model, str) and model.strip():
-                    metadata["model"] = model.strip()
+    fields = _head_fields(path)
+    session_id = fields.pop("sessionId", None)
+    cwd = fields.pop("cwd", None)
+    metadata: dict[str, Any] = {
+        key: fields[key] for key in ("gitBranch", "version", "title", "model") if key in fields
+    }
 
     if session_id is None and cwd is None:
         return None
@@ -147,12 +166,14 @@ def extract_claude_session(
 def _iter_session_files(
     base: Path, candidates: SessionCandidates | None
 ) -> Iterable[Path]:
-    """Yield transcript ``*.jsonl`` paths to inspect.
+    """Yield top-level transcript ``*.jsonl`` paths to inspect.
 
-    A known candidate cwd maps forward to its project directory via
-    ``project_dir_name(cwd)``, so we can resolve sessions without reverse-decoding
-    the directory name. When the cwd is unknown (no candidates, or matching by
-    session id) we fall back to scanning every project directory newest-first.
+    Claude stores each session at ``<base>/<project>/<sessionId>.jsonl``, so a
+    candidate session id is looked up by file name and a candidate cwd maps
+    forward to its project directory via ``project_dir_name(cwd)``. Only an
+    unfiltered listing scans every project directory. Nested files (such as
+    ``<session>/subagents/*.jsonl``) reuse their parent's session id and are
+    never treated as sessions of their own.
     """
     seen: set[Path] = set()
 
@@ -162,39 +183,34 @@ def _iter_session_files(
         seen.add(path)
         yield path
 
-    if candidates is not None and candidates.cwds:
-        for cwd in candidates.cwds:
-            project = base / project_dir_name(cwd)
-            if not project.is_dir():
-                continue
-            for path in project.glob("*.jsonl"):
-                yield from emit(path)
-
-    needs_full_scan = candidates is None or bool(candidates.session_ids)
-    if not needs_full_scan:
+    if candidates is None:
+        try:
+            paths = sorted(
+                base.glob("*/*.jsonl"),
+                key=lambda path: safe_mtime(path) or 0.0,
+                reverse=True,
+            )
+        except OSError:
+            return
+        for path in paths:
+            yield from emit(path)
         return
 
-    try:
-        paths = sorted(
-            base.rglob("*.jsonl"),
-            key=lambda path: safe_mtime(path) or 0.0,
-            reverse=True,
-        )
-    except OSError:
-        return
-    for path in paths:
-        yield from emit(path)
+    if candidates.session_ids:
+        try:
+            projects = [path for path in base.iterdir() if path.is_dir()]
+        except OSError:
+            projects = []
+        for session_id in sorted(candidates.session_ids):
+            for project in projects:
+                yield from emit(project / f"{session_id}.jsonl")
 
-
-def _records_satisfy_candidates(
-    records: list[SessionRecord], candidates: SessionCandidates | None
-) -> bool:
-    if candidates is None or candidates.is_empty:
-        return False
-
-    session_ids = {rec.session_id for rec in records if rec.session_id}
-    cwds = {rec.cwd for rec in records if rec.cwd is not None}
-    return candidates.session_ids.issubset(session_ids) and candidates.cwds.issubset(cwds)
+    for cwd in sorted(candidates.cwds):
+        project = base / project_dir_name(cwd)
+        if not project.is_dir():
+            continue
+        for path in project.glob("*.jsonl"):
+            yield from emit(path)
 
 
 def load_sessions(
@@ -206,18 +222,24 @@ def load_sessions(
     records: list[SessionRecord] = []
     seen: set[tuple[str, str]] = set()
 
-    for base in base_paths:
-        if not base.exists():
-            continue
-        for path in _iter_session_files(base, candidates):
-            rec = extract_claude_session(path, candidates)
-            if rec is None:
+    cache = SessionCache("claude")
+    try:
+        for base in base_paths:
+            if not base.exists():
                 continue
-            key = (rec.tool, rec.session_id)
-            if key in seen:
-                continue
-            seen.add(key)
-            records.append(rec)
-        if _records_satisfy_candidates(records, candidates):
-            break
+            for path in _iter_session_files(base, candidates):
+                stamp = fingerprint(path)
+                hit, rec = cache.read(path, stamp)
+                if not hit:
+                    rec = extract_claude_session(path)
+                    cache.write(path, stamp, rec)
+                if rec is None or not session_matches_candidates(rec, candidates):
+                    continue
+                key = (rec.tool, rec.session_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                records.append(rec)
+    finally:
+        cache.close()
     return records

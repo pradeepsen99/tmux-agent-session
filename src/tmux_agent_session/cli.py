@@ -175,6 +175,10 @@ def build_session_candidates(
     for proc in processes:
         ids = ids_by_tool.setdefault(proc.tool, set())
         ids.update(session_id for session_id in proc.session_ids if session_id)
+        # A known session id pins the transcript; matching by cwd as well would
+        # pull in every other session that ever ran in the same directory.
+        if any(proc.session_ids):
+            continue
 
         cwd = normalize_cwd(proc.cwd)
         if cwd is not None:

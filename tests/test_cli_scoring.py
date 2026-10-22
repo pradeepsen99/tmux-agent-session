@@ -225,3 +225,13 @@ def test_sort_records_orders_by_status_score_last_write_tool_and_id() -> None:
         "b",
         "z",
     ]
+
+
+def test_build_session_candidates_uses_cwd_only_without_session_id() -> None:
+    with_id = make_process(pid=1, tool="claude", cwd="/tmp/repo", session_ids=["abc123def"])
+    without_id = make_process(pid=2, tool="claude", cwd="/tmp/other")
+
+    candidates = cli.build_session_candidates([with_id, without_id])["claude"]
+
+    assert candidates.session_ids == frozenset({"abc123def"})
+    assert candidates.cwds == frozenset({cli.normalize_cwd("/tmp/other")})
