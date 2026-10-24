@@ -29,6 +29,15 @@ FEEDBACK_PROMPT_PATTERNS = [
     re.compile(r"\bdo you want to\b", re.IGNORECASE),
     re.compile(r"\bpress\s+(?:enter|return|y|n|yes|no)\b", re.IGNORECASE),
 ]
+# Codex, OpenCode, and older Claude Code builds show an interrupt hint while working.
+WORKING_HINT = re.compile(r"\besc\s+(?:to\s+)?interrupt\b", re.IGNORECASE)
+ACTIVITY_TAIL_LINES = 15
+INPUT_BOX_BORDER = re.compile(r"^─{10,}$")
+# Claude Code spinner, e.g. "✽ Hatching… (16s · ↓ 1.2k tokens)". Once a turn
+# ends it becomes "✻ Crunched for 1m 28s", which has no ellipsis.
+SPINNER_LINE = re.compile(r"^[^\s\w]\s+\w[\w\s'-]*…\s*\((?:\d+h\s*)?(?:\d+m\s*)?\d+s\b")
+BACKGROUND_WAIT = re.compile(r"\bWaiting for \d+ background agents? to finish\b")
+BACKGROUND_AGENT_ROW = re.compile(r"\d+s\s*·\s*↓\s*[\d.]+[kKmM]?\s+tokens\b")
 
 
 def strip_ansi(text: str) -> str:
@@ -98,11 +107,43 @@ def score_session(
         rec.status = "stale"
 
 
-def mark_feedback_required(
+def _clean_lines(lines: list[str]) -> list[str]:
+    return [strip_ansi(line).rstrip() for line in lines if line.strip()]
+
+
+def _input_box_borders(lines: list[str]) -> tuple[int, int] | None:
+    """Return (top, bottom) indexes of the last bordered input box, if any."""
+    borders = [i for i, line in enumerate(lines) if INPUT_BOX_BORDER.match(line)]
+    if len(borders) < 2:
+        return None
+    return borders[-2], borders[-1]
+
+
+def pane_is_working(lines: list[str]) -> bool:
+    cleaned = _clean_lines(lines)
+    if not cleaned:
+        return False
+    if any(WORKING_HINT.search(line) for line in cleaned[-ACTIVITY_TAIL_LINES:]):
+        return True
+
+    box = _input_box_borders(cleaned)
+    if box is None:
+        return False
+    top, bottom = box
+    # Claude Code draws its spinner just above the input box and lists running
+    # background agents in the footer below it; scrollback is ignored.
+    above = cleaned[max(0, top - 3):top]
+    if any(SPINNER_LINE.match(line) or BACKGROUND_WAIT.search(line) for line in above):
+        return True
+    return any(BACKGROUND_AGENT_ROW.search(line) for line in cleaned[bottom + 1:])
+
+
+def classify_pane_activity(
     records: list[SessionRecord],
     preview_callback: Callable[[SessionRecord, int], list[str]],
     limit: int = 30,
 ) -> None:
+    """Mark live sessions as waiting (needs input), active (working), or idle."""
     records_by_pane_id: dict[str, SessionRecord] = {}
     for rec in records:
         if rec.tmux_pane is None or rec.tmux_pane.pane_id in records_by_pane_id:
@@ -125,9 +166,13 @@ def mark_feedback_required(
     for rec in records:
         if rec.tmux_pane is None:
             continue
-        if not pane_requires_user_feedback(
-            previews_by_pane_id.get(rec.tmux_pane.pane_id, [])
-        ):
+        preview = previews_by_pane_id.get(rec.tmux_pane.pane_id, [])
+        if not pane_requires_user_feedback(preview):
+            if rec.status == "active" and not pane_is_working(preview):
+                rec.status = "idle"
+                reason = "tmux pane shows no work in progress"
+                if reason not in rec.reasons:
+                    rec.reasons.append(reason)
             continue
         rec.requires_user_feedback = True
         rec.status = "waiting"
@@ -167,7 +212,7 @@ def add_process_only_records(
 
 
 def sort_records(records: list[SessionRecord]) -> list[SessionRecord]:
-    status_order = {"waiting": 0, "active": 1, "recent": 2, "stale": 3}
+    status_order = {"waiting": 0, "active": 1, "idle": 2, "recent": 3, "stale": 4}
     return sorted(
         records,
         key=lambda r: (

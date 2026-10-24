@@ -204,9 +204,14 @@ PALETTE = {
 STATUS_STYLES = {
     "waiting": "bold yellow",
     "active": "bold green",
+    "idle": "bright_black",
     "recent": "blue",
     "stale": "magenta",
 }
+
+
+# Statuses whose agent process is still running in a tmux pane.
+LIVE_STATUSES = {"waiting", "active", "idle"}
 
 
 def status_text(status: str):
@@ -267,7 +272,7 @@ def print_table(records: list[SessionRecord], console: Any | None = None) -> Non
         table.add_column("TARGET", no_wrap=True)
         table.add_column("DETAILS", ratio=1, overflow="fold")
         for rec in group:
-            marker = "●" if rec.status in {"waiting", "active"} else "○"
+            marker = "●" if rec.status in LIVE_STATUSES else "○"
             table.add_row(
                 Text(marker, style=status_text(rec.status).style),
                 rec.tool,
@@ -317,3 +322,22 @@ def print_json(records: list[SessionRecord]) -> None:
             }
         )
     print(json.dumps(payload, indent=2))
+
+
+def tmux_status_text(records: list[SessionRecord]) -> str:
+    """Render a tmux status-line segment: working, needs-you, and idle counts.
+
+    Only foreground styles are emitted so the segment inherits whatever
+    background block tmux.conf wraps around ``#(tas --status)``.
+    """
+    segments = (
+        ("active", "#[fg=colour46]● {} live"),
+        ("waiting", "#[fg=colour214,bold]▲ {} need you#[nobold]"),
+        ("idle", "#[fg=colour250]○ {} idle"),
+    )
+    parts = []
+    for status, template in segments:
+        count = sum(rec.status == status for rec in records)
+        if count:
+            parts.append(template.format(count))
+    return " ".join(parts) or "#[fg=colour250]○ 0 agents"

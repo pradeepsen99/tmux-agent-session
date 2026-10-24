@@ -97,7 +97,7 @@ def test_pane_requires_user_feedback_detects_prompt_text() -> None:
     assert not cli.pane_requires_user_feedback(["tests passed", "idle"])
 
 
-def test_mark_feedback_required_updates_status_and_reason() -> None:
+def test_classify_pane_activity_updates_status_and_reason() -> None:
     rec = make_record(minutes_ago=1)
     rec.status = "active"
     rec.tmux_pane = cli.TmuxPane(
@@ -109,7 +109,7 @@ def test_mark_feedback_required_updates_status_and_reason() -> None:
         pane_tty="ttys001",
     )
 
-    cli.mark_feedback_required(
+    cli.classify_pane_activity(
         [rec], lambda _rec, _limit: ["Agent needs user feedback"]
     )
 
@@ -118,7 +118,7 @@ def test_mark_feedback_required_updates_status_and_reason() -> None:
     assert "tmux pane appears to be waiting for user feedback" in rec.reasons
 
 
-def test_mark_feedback_required_captures_duplicate_panes_once() -> None:
+def test_classify_pane_activity_captures_duplicate_panes_once() -> None:
     pane = cli.TmuxPane(
         session_name="work",
         window_index="1",
@@ -139,7 +139,7 @@ def test_mark_feedback_required_captures_duplicate_panes_once() -> None:
         calls.append(rec.session_id)
         return ["Agent needs user feedback"]
 
-    cli.mark_feedback_required([first, second], preview)
+    cli.classify_pane_activity([first, second], preview)
 
     assert calls == ["session-1"]
     assert first.status == "waiting"
@@ -235,3 +235,71 @@ def test_build_session_candidates_uses_cwd_only_without_session_id() -> None:
 
     assert candidates.session_ids == frozenset({"abc123def"})
     assert candidates.cwds == frozenset({cli.normalize_cwd("/tmp/other")})
+
+
+BOX = "─" * 40
+
+
+def test_pane_is_working_detects_claude_spinner_above_input_box() -> None:
+    lines = [
+        "⏺ Reading files",
+        "✽ Hatching… (16s · ↓ 1.2k tokens · thought for 2s)",
+        "",
+        BOX,
+        "❯ ",
+        BOX,
+        "  ⏵⏵ auto mode on (shift+tab to cycle)",
+    ]
+
+    assert cli.pane_is_working(lines)
+
+
+def test_pane_is_working_ignores_finished_turn_and_scrollback_spinner() -> None:
+    lines = [
+        "  ⎿  ✽ Hatching… (16s · ↓ 1.2k tokens)",
+        "⏺ All done.",
+        "✻ Crunched for 1m 28s · done 5:26 PM",
+        BOX,
+        "❯ ",
+        BOX,
+        "  ⏵⏵ auto mode on (shift+tab to cycle)",
+    ]
+
+    assert not cli.pane_is_working(lines)
+
+
+def test_pane_is_working_detects_background_agents_in_footer() -> None:
+    lines = [
+        "⏺ Agent \"Reuse review\" finished · 1m 40s",
+        BOX,
+        "❯ ",
+        BOX,
+        "  ⏺ main",
+        "  ◯ general-purpose  Comparing evaluators     1m 45s · ↓ 114.1k tokens",
+    ]
+
+    assert cli.pane_is_working(lines)
+
+
+def test_pane_is_working_detects_interrupt_hint() -> None:
+    assert cli.pane_is_working(["• Working (5s • esc to interrupt)"])
+    assert not cli.pane_is_working(["› ", "100% context left"])
+
+
+def test_classify_pane_activity_marks_quiet_active_panes_idle() -> None:
+    pane = cli.TmuxPane(
+        session_name="work",
+        window_index="1",
+        window_name="editor",
+        pane_index="0",
+        pane_id="%1",
+        pane_tty="ttys001",
+    )
+    rec = make_record(minutes_ago=1)
+    rec.status = "active"
+    rec.tmux_pane = pane
+
+    cli.classify_pane_activity([rec], lambda _rec, _limit: [BOX, "❯ ", BOX])
+
+    assert rec.status == "idle"
+    assert rec.requires_user_feedback is False

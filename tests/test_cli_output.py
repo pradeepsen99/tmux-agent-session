@@ -228,3 +228,20 @@ def test_format_age_and_short_model() -> None:
     assert short_model("claude-opus-5-5") == "opus-5-5"
     assert short_model("claude-sonnet-4-5-20250929") == "sonnet-4-5"
     assert short_model("gpt-5") == "gpt-5"
+
+
+def test_tmux_status_text_counts_working_waiting_and_idle() -> None:
+    working, waiting, idle, recent = (make_record() for _ in range(4))
+    waiting.status = "waiting"
+    idle.status = "idle"
+    recent.status = "recent"
+
+    text = cli.tmux_status_text([working, waiting, idle, recent])
+
+    assert "● 1 live" in text
+    assert "▲ 1 need you" in text
+    assert "○ 1 idle" in text
+    assert "need you" not in cli.tmux_status_text([working, idle])
+    assert "0 agents" in cli.tmux_status_text([recent])
+    # tmux.conf owns the segment background; resetting styles would break it.
+    assert "bg=" not in text and "#[default]" not in text

@@ -77,7 +77,7 @@ def build_records(args: argparse.Namespace, backend: ModuleType) -> list[Session
     records = [rec for rec in records if rec.tmux_pane is not None]
     for tool in ("codex", "opencode", "cursor-agent", "claude"):
         records = backend.deduplicate_tmux_pane_records(records, tool)
-    backend.mark_feedback_required(records, backend.capture_tmux_pane_preview)
+    backend.classify_pane_activity(records, backend.capture_tmux_pane_preview)
     records = backend.sort_records(records)
 
     if not args.include_stale:

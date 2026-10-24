@@ -21,6 +21,7 @@ from .formatting import (
     display_model,
     first_metadata_value,
     PALETTE,
+    LIVE_STATUSES,
     STATUS_STYLES,
     format_age,
     format_duration,
@@ -177,7 +178,7 @@ def session_option(rec: SessionRecord, selected: bool = False, now: float | None
     row.add_column(ratio=1, overflow="ellipsis", no_wrap=True)
     row.add_column(justify="right", no_wrap=True)
     name = Text("› " if selected else "  ", style=f"bold {ACCENT}" if selected else "")
-    marker = "●" if rec.status in {"active", "waiting"} else "○"
+    marker = "●" if rec.status in LIVE_STATUSES else "○"
     name.append(f"{marker} ", style=status_text(rec.status).style)
     name.append(title, style=f"bold {ACCENT}" if selected else "")
     row.add_row(name, status_text(rec.status))
@@ -247,7 +248,7 @@ def detail_key(rec: SessionRecord) -> tuple:
 
 def summary_text(records: list[SessionRecord]) -> Text:
     summary = Text(f"All {len(records)}", style="bold")
-    for label, status in (("Needs you", "waiting"), ("Working", "active"),
+    for label, status in (("Needs you", "waiting"), ("Working", "active"), ("Idle", "idle"),
                           ("Recent", "recent"), ("Inactive", "stale")):
         count = sum(rec.status == status for rec in records)
         summary.append("   ")

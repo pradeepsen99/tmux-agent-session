@@ -26,6 +26,7 @@ from .formatting import (
     picker_metadata_items,
     print_json,
     print_table,
+    tmux_status_text,
     truncate,
 )
 from .harnesses import load_sessions as _load_harness_sessions
@@ -46,7 +47,8 @@ from .processes import (
 from .scoring import (
     add_process_only_records,
     age_minutes,
-    mark_feedback_required,
+    classify_pane_activity,
+    pane_is_working,
     pane_requires_user_feedback,
     score_session,
     sort_records,
@@ -238,6 +240,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-cache", action="store_true", help="bypass the persistent metadata cache")
     p.add_argument("--json", action="store_true", help="emit JSON")
     p.add_argument(
+        "--status",
+        action="store_true",
+        help="print a one-line tmux status segment (live / needs-you counts)",
+    )
+    p.add_argument(
         "--pick",
         action="store_true",
         help="open the Textual picker and focus the selected tmux pane",
@@ -260,15 +267,17 @@ def main() -> int:
     parser = build_arg_parser()
     args = parser.parse_args()
 
-    if args.pick and args.json:
-        parser.error("--pick cannot be combined with --json")
+    if sum((args.pick, args.json, args.status)) > 1:
+        parser.error("--pick, --json, and --status are mutually exclusive")
 
     if args.pick:
         usage = ClaudeUsageTracker([args.claude_dir])
         return run_picker([], records_callback=lambda: build_records(args), usage_callback=usage.report)
 
     records = build_records(args)
-    if args.json:
+    if args.status:
+        print(tmux_status_text(records))
+    elif args.json:
         print_json(records)
     else:
         print_table(records)
